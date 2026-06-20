@@ -126,6 +126,7 @@ python3 server.py --host 0.0.0.0 --port $PORT
 
 ## Observacoes
 
-- O editor nao altera os arquivos de audio dentro de `Sounds/`; ele apenas referencia os nomes deles.
+- Em projeto local, os cortes criados no editor sao salvos dentro de `Sounds/` e ja entram no pad escolhido.
+- Em projeto online, os cortes ficam vinculados ao projeto pelo Supabase Storage e reaparecem ao abrir o projeto novamente.
 - Ao salvar, a pasta `keyLED/` e recriada para evitar arquivos antigos sobrando.
 - Se voce zipar o pack para distribuir, compacte apenas os arquivos do projeto UniPad. A pasta `unipack_editor/` e a ferramenta de edicao, nao faz parte do pack.

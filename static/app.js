@@ -1,10 +1,21 @@
 import {
+  createProjectAudioSignedUrl,
+  createCloudProjectRecord,
   deletePublishedAnimation,
+  deleteCloudProjectRecord,
+  fetchOwnProjects,
   fetchPublicAnimations,
-  getSupabaseClient,
+  getCurrentSession,
+  getCurrentUser,
   hasSupabaseConfig,
+  onAuthStateChange,
   publishAnimation,
-  signInAnonymouslyIfNeeded,
+  removeProjectAudioClip,
+  signInWithEmail,
+  signOutCurrentUser,
+  signUpWithEmail,
+  uploadProjectAudioClip,
+  updateCloudProjectRecord,
 } from "./supabase-service.js";
 
 const LED_LIBRARY_KEY = "unipack-led-library-v1";
@@ -29,6 +40,11 @@ const state = {
   ledLibrarySyncing: false,
   ledLibrarySyncError: "",
   supabaseUserId: "",
+  authMode: "signin",
+  authUser: null,
+  cloudProjects: [],
+  cloudProjectsLoading: false,
+  cloudProjectsError: "",
   ledLibraryPanelSubview: "local",
   ledCommunitySort: "rating_desc",
   editorAnimationLibraryPage: 0,
@@ -80,6 +96,7 @@ const LAUNCHPAD_ARGB = [
 ];
 
 const refs = {
+  appShell: document.querySelector("#app-shell"),
   projectPath: document.querySelector("#project-path"),
   pickProjectPath: document.querySelector("#pick-project-path"),
   createProject: document.querySelector("#create-project"),
@@ -87,6 +104,29 @@ const refs = {
   saveProject: document.querySelector("#save-project"),
   exportProject: document.querySelector("#export-project"),
   status: document.querySelector("#status"),
+  projectToolbarShell: document.querySelector("#project-toolbar-shell"),
+  authTabs: document.querySelector("#auth-tabs"),
+  authSigninTab: document.querySelector("#auth-signin-tab"),
+  authSignupTab: document.querySelector("#auth-signup-tab"),
+  authGuestPanel: document.querySelector("#auth-guest-panel"),
+  authUserPanel: document.querySelector("#auth-user-panel"),
+  authEmail: document.querySelector("#auth-email"),
+  authPassword: document.querySelector("#auth-password"),
+  authSubmit: document.querySelector("#auth-submit"),
+  authStatus: document.querySelector("#auth-status"),
+  authUserName: document.querySelector("#auth-user-name"),
+  authUserEmail: document.querySelector("#auth-user-email"),
+  authUserMeta: document.querySelector("#auth-user-meta"),
+  authSignout: document.querySelector("#auth-signout"),
+  cloudProjectShell: document.querySelector("#cloud-project-shell"),
+  cloudProjectTitle: document.querySelector("#cloud-project-title"),
+  cloudProjectSubtitle: document.querySelector("#cloud-project-subtitle"),
+  cloudProjectName: document.querySelector("#cloud-project-name"),
+  cloudProjectCreate: document.querySelector("#cloud-project-create"),
+  cloudProjectSave: document.querySelector("#cloud-project-save"),
+  cloudProjectRefresh: document.querySelector("#cloud-project-refresh"),
+  cloudProjectStatus: document.querySelector("#cloud-project-status"),
+  cloudProjectList: document.querySelector("#cloud-project-list"),
   stats: document.querySelector("#stats"),
   infoFields: document.querySelector("#info-fields"),
   extraInfo: document.querySelector("#extra-info"),
@@ -104,6 +144,7 @@ const refs = {
   selectedPadBadge: document.querySelector("#selected-pad-badge"),
   soundEditor: document.querySelector("#sound-editor"),
   ledEditor: document.querySelector("#led-editor"),
+  viewNavbar: document.querySelector(".view-navbar"),
   audioLibraryPanel: document.querySelector("#audio-library-panel"),
   toggleAudioLibrary: document.querySelector("#toggle-audio-library"),
   addSoundRow: document.querySelector("#add-sound-row"),
@@ -178,6 +219,34 @@ refs.pickProjectPath.addEventListener("click", async () => {
 refs.loadProject.addEventListener("click", () => loadProject());
 refs.saveProject.addEventListener("click", () => saveProject());
 refs.exportProject.addEventListener("click", () => exportProjectZip());
+refs.authSigninTab?.addEventListener("click", () => {
+  state.authMode = "signin";
+  renderAuthPanel();
+});
+refs.authSignupTab?.addEventListener("click", () => {
+  state.authMode = "signup";
+  renderAuthPanel();
+});
+refs.authSubmit?.addEventListener("click", () => {
+  void handleAuthSubmit();
+});
+refs.authPassword?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    void handleAuthSubmit();
+  }
+});
+refs.authSignout?.addEventListener("click", () => {
+  void handleAuthSignOut();
+});
+refs.cloudProjectCreate?.addEventListener("click", () => {
+  void createCloudProjectFromUi();
+});
+refs.cloudProjectSave?.addEventListener("click", () => {
+  void saveCurrentProjectOnline();
+});
+refs.cloudProjectRefresh?.addEventListener("click", () => {
+  void refreshCloudProjects({ quiet: false });
+});
 refs.toggleProjectPanel.addEventListener("click", () => {
   state.projectPanelOpen = !state.projectPanelOpen;
   renderProjectPanelVisibility();
@@ -370,8 +439,14 @@ function initializeApp() {
   const savedPath = loadRememberedProjectPath();
   refs.projectPath.value = savedPath;
   renderAll();
+  void initializeAuth();
   void initializeSupabaseLedLibrary();
   if (savedPath) {
+    if (savedPath.startsWith("cloud:")) {
+      refs.projectPath.value = "";
+      setStatus("Entrando na conta para reabrir seu projeto online...", "");
+      return;
+    }
     void loadProject(savedPath, { fromRemembered: true });
     return;
   }
@@ -384,6 +459,29 @@ async function loadProject(path = refs.projectPath.value.trim(), options = {}) {
     setStatus("Escolha uma pasta de projeto para carregar.", "error");
     return false;
   }
+  if (targetPath.startsWith("cloud:")) {
+    const projectId = targetPath.slice("cloud:".length).trim();
+    if (!projectId) {
+      setStatus("Projeto online invalido.", "error");
+      return false;
+    }
+    if (!state.authUser) {
+      setStatus("Entre com sua conta para abrir este projeto online.", "error");
+      return false;
+    }
+    let record = state.cloudProjects.find((entry) => entry.id === projectId);
+    if (!record) {
+      await refreshCloudProjects({ quiet: true, restoreRemembered: false });
+      record = state.cloudProjects.find((entry) => entry.id === projectId);
+    }
+    if (!record) {
+      setStatus("O projeto online nao foi encontrado na sua conta.", "error");
+      clearRememberedProjectPath();
+      return false;
+    }
+    openCloudProjectRecord(record);
+    return true;
+  }
 
   setStatus("Carregando projeto...");
   try {
@@ -394,7 +492,7 @@ async function loadProject(path = refs.projectPath.value.trim(), options = {}) {
     }
 
     state.project = normalizeProject(project);
-    state.audioLibrary = loadAudioLibrary(state.project.projectPath);
+    syncAudioLibraryFromProject(state.project);
     state.audioLibraryPickerOpen = false;
     refs.toggleAudioLibrary.textContent = "Biblioteca";
     resetAudioClipEditor();
@@ -459,7 +557,7 @@ async function createProject() {
     }
 
     state.project = normalizeProject(project);
-    state.audioLibrary = loadAudioLibrary(state.project.projectPath);
+    syncAudioLibraryFromProject(state.project);
     state.audioLibraryPickerOpen = false;
     refs.toggleAudioLibrary.textContent = "Biblioteca";
     resetAudioClipEditor();
@@ -486,6 +584,9 @@ async function saveProject(options = {}) {
     }
     return false;
   }
+  if (isCloudProject()) {
+    return saveCurrentProjectOnline(options);
+  }
   if (!options.quiet) {
     setStatus("Salvando projeto...");
   }
@@ -504,7 +605,7 @@ async function saveProject(options = {}) {
     }
 
     state.project = normalizeProject(project);
-    state.audioLibrary = loadAudioLibrary(state.project.projectPath);
+    syncAudioLibraryFromProject(state.project);
     rememberProjectPath(state.project.projectPath);
     state.currentChain = clampChain(state.currentChain, getChainCount());
     state.selectedPadKey = preservedPadKey;
@@ -533,6 +634,10 @@ async function saveProject(options = {}) {
 async function exportProjectZip() {
   if (!state.project) {
     setStatus("Nenhum projeto carregado para exportar.", "error");
+    return false;
+  }
+  if (isCloudProject()) {
+    setStatus("Exportacao .zip ainda funciona apenas para projetos locais.", "error");
     return false;
   }
 
@@ -629,7 +734,9 @@ function normalizeProject(project) {
 }
 
 function renderAll() {
+  renderSessionLayout();
   renderHeaderBits();
+  renderCloudProjectsPanel();
   renderProjectPanelVisibility();
   renderViewNavigation();
   renderStats();
@@ -644,7 +751,42 @@ function renderAll() {
   renderLedLibraryPanel();
 }
 
+function renderSessionLayout() {
+  const hasUser = Boolean(state.authUser);
+  const hasProject = Boolean(state.project);
+
+  refs.appShell?.classList.toggle("is-auth-landing", !hasUser);
+  refs.appShell?.classList.toggle("is-dashboard-mode", hasUser && !hasProject);
+  refs.appShell?.classList.toggle("is-editor-session", hasUser && hasProject);
+
+  if (refs.projectToolbarShell) {
+    refs.projectToolbarShell.hidden = !hasProject;
+    refs.projectToolbarShell.style.display = hasProject ? "grid" : "none";
+  }
+  if (refs.viewNavbar) {
+    refs.viewNavbar.hidden = !hasProject;
+    refs.viewNavbar.style.display = hasProject ? "" : "none";
+  }
+}
+
 function renderViewNavigation() {
+  if (!state.authUser || !state.project) {
+    stopLedPreview("studio");
+    stopLedPreview("pad");
+    refs.mainViewShell.hidden = true;
+    refs.mainViewShell.style.display = "none";
+    refs.clipEditorPanel.hidden = true;
+    refs.clipEditorPanel.style.display = "none";
+    refs.ledStudioPanel.hidden = true;
+    refs.ledStudioPanel.style.display = "none";
+    refs.ledLibraryPanel.hidden = true;
+    refs.ledLibraryPanel.style.display = "none";
+    refs.viewMainTab.classList.remove("is-active");
+    refs.viewAudioTab.classList.remove("is-active");
+    refs.viewLedTab.classList.remove("is-active");
+    refs.viewLibraryTab.classList.remove("is-active");
+    return;
+  }
   const isEditor = state.currentView === "editor";
   const isAudio = state.currentView === "audio";
   const isLed = state.currentView === "led";
@@ -678,14 +820,24 @@ function renderHeaderBits() {
     refs.saveProject.disabled = true;
     refs.exportProject.disabled = true;
     refs.toggleProjectPanel.disabled = true;
+    refs.projectPath.value = "";
+    if (refs.cloudProjectName) {
+      refs.cloudProjectName.value = "";
+    }
     return;
   }
   refs.soundCountPill.hidden = false;
   refs.saveProject.disabled = false;
-  refs.exportProject.disabled = false;
+  refs.exportProject.disabled = isCloudProject();
   refs.toggleProjectPanel.disabled = false;
   refs.projectTitlePill.textContent = state.project.info.title || "Sem titulo";
   refs.soundCountPill.textContent = `${state.project.sounds.length} arquivos`;
+  if (refs.cloudProjectName && isCloudProject()) {
+    refs.cloudProjectName.value = state.project.projectName || state.project.info.title || "";
+  }
+  if (!isCloudProject()) {
+    refs.projectPath.value = state.project.projectPath || "";
+  }
 }
 
 function renderProjectPanelVisibility() {
@@ -1732,7 +1884,12 @@ function createAudioImportPanel(pad) {
   return el(
     "div",
     { className: "editor-focus stack" },
-    createFocusHeader("Corte de audio", "Abra o editor aqui na pagina para importar, ver as faixas e criar cortes."),
+    createFocusHeader(
+      "Corte de audio",
+      isCloudProject()
+        ? "No projeto online, o corte ja sobe para sua conta e fica salvo dentro deste projeto."
+        : "Abra o editor aqui na pagina para importar, ver as faixas e criar cortes."
+    ),
     el(
       "div",
       { className: "editor-preview stack" },
@@ -1766,8 +1923,8 @@ async function previewSound(soundFile) {
     return;
   }
 
-  const soundUrl = `/api/sound?path=${encodeURIComponent(state.project.projectPath)}&file=${encodeURIComponent(soundFile)}&v=${Date.now()}`;
   try {
+    const soundUrl = await resolveSoundPlaybackUrl(soundFile);
     stopAudioClipPreviewSource();
     state.audio.pause();
     state.audio.currentTime = 0;
@@ -1783,6 +1940,27 @@ async function previewSound(soundFile) {
   } catch (error) {
     setStatus(error.message || "Nao foi possivel tocar o audio.", "error");
   }
+}
+
+async function resolveSoundPlaybackUrl(soundFile) {
+  if (!isCloudProject()) {
+    return `/api/sound?path=${encodeURIComponent(state.project.projectPath)}&file=${encodeURIComponent(soundFile)}&v=${Date.now()}`;
+  }
+  const soundEntry = findProjectSoundEntry(soundFile);
+  if (!soundEntry?.storagePath) {
+    throw new Error("Este audio online ainda nao possui arquivo salvo no projeto.");
+  }
+  const signedUrl = await createProjectAudioSignedUrl(soundEntry.storagePath, 3600);
+  if (!signedUrl) {
+    throw new Error("Nao foi possivel abrir o audio salvo no projeto online.");
+  }
+  return signedUrl;
+}
+
+function findProjectSoundEntry(soundFile) {
+  const normalizedPath = String(soundFile || "").trim();
+  if (!normalizedPath) return null;
+  return (state.project?.sounds || []).find((entry) => String(entry.path || "").trim() === normalizedPath) || null;
 }
 
 function previewSelectedPadMedia() {
@@ -2402,6 +2580,12 @@ async function saveAudioClipSelection() {
   try {
     setAudioClipStatus("Criando corte...", "success");
     const fileName = ensureWavFileName(refs.clipName.value || state.audioClipEditor.suggestedName);
+    if (isCloudProject()) {
+      await saveAudioClipSelectionOnline(fileName);
+      await clearAudioClipDraftRecord(targetProjectPath);
+      setAudioClipStatus("Corte criado, salvo no projeto online e aplicado ao pad.", "success");
+      return;
+    }
     const payloadBody = {
       projectPath: targetProjectPath,
       fileName,
@@ -2444,6 +2628,47 @@ async function saveAudioClipSelection() {
   }
 }
 
+async function saveAudioClipSelectionOnline(fileName) {
+  if (!state.project?.projectId) {
+    throw new Error("Salve ou crie o projeto online antes de adicionar cortes.");
+  }
+  const relativePath = buildUniqueProjectSoundPath(fileName);
+  const clip = buildAudioClipBuffer();
+  const bytes = encodeAudioBufferToWavBytes(clip);
+  const previousProject = structuredClone(state.project);
+  const previousAudioLibrary = structuredClone(state.audioLibrary);
+  let uploaded = null;
+  try {
+    uploaded = await uploadProjectAudioClip(state.project.projectId, relativePath, bytes, "audio/wav");
+    applyImportedClipToProject(
+      uploaded.relativePath,
+      state.audioClipEditor.padKey,
+      state.audioClipEditor.soundIndex,
+      {
+        path: uploaded.relativePath,
+        name: uploaded.relativePath.split("/").pop() || fileStem(uploaded.relativePath),
+        size: bytes.byteLength,
+        bucket: uploaded.bucket,
+        storagePath: uploaded.storagePath,
+        mimeType: "audio/wav",
+      }
+    );
+    await saveCurrentProjectOnline({ quiet: true, rethrow: true });
+  } catch (error) {
+    state.project = previousProject;
+    state.audioLibrary = previousAudioLibrary;
+    renderAll();
+    if (uploaded?.storagePath) {
+      try {
+        await removeProjectAudioClip(uploaded.storagePath);
+      } catch (_cleanupError) {
+        // keep original error
+      }
+    }
+    throw error;
+  }
+}
+
 function continueAudioClipFromSelectionEnd() {
   if (!state.audioClipEditor.audioBuffer) return;
   const duration = state.audioClipEditor.audioBuffer.duration;
@@ -2482,7 +2707,13 @@ function applyImportedClipToProject(importedFile, targetPadKey, targetSoundIndex
   pad.sounds[slotIndex].soundFile = importedFile;
   state.selectedSoundIndex = slotIndex;
   state.project.stats = buildProjectStatsSnapshot();
-  saveSoundToLibrary(importedFile, { name: fileStem(importedFile) });
+  saveSoundToLibrary(importedFile, {
+    name: soundEntry?.name || fileStem(importedFile),
+    bucket: soundEntry?.bucket,
+    storagePath: soundEntry?.storagePath,
+    mimeType: soundEntry?.mimeType,
+    size: soundEntry?.size,
+  });
   state.audioClipEditor.suggestedName = suggestClipFileName();
   refs.clipName.value = state.audioClipEditor.suggestedName;
   renderHeaderBits();
@@ -3048,6 +3279,9 @@ function upsertProjectSoundEntry(soundEntry) {
     path: String(soundEntry.path),
     name: String(soundEntry.name || String(soundEntry.path).split("/").pop() || fileStem(soundEntry.path)),
     size: Number(soundEntry.size) || 0,
+    bucket: String(soundEntry.bucket || ""),
+    storagePath: String(soundEntry.storagePath || ""),
+    mimeType: String(soundEntry.mimeType || ""),
   };
   const nextSounds = [
     normalized,
@@ -3926,6 +4160,29 @@ function createEmptyState(message) {
 }
 
 function createProjectStartPanel() {
+  const actions = [
+    createMiniButton("Escolher pasta", async () => {
+      await chooseFolderInto(refs.projectPath);
+    }),
+    createMiniButton("Criar projeto em branco", async () => {
+      await createProject();
+    }),
+    createMiniButton("Carregar projeto existente", async () => {
+      const picked = await chooseFolderInto(refs.projectPath);
+      if (picked) {
+        await loadProject();
+      }
+    }),
+  ];
+
+  if (state.authUser && hasSupabaseConfig()) {
+    actions.unshift(
+      createMiniButton("Criar online", async () => {
+        await createCloudProjectFromUi();
+      })
+    );
+  }
+
   return el(
     "div",
     { className: "editor-focus stack" },
@@ -3934,22 +4191,7 @@ function createProjectStartPanel() {
       className: "muted",
       textContent: "Basta escolher a pasta onde o pack sera salvo. O editor cria a estrutura base automaticamente.",
     }),
-    el(
-      "div",
-      { className: "compact-actions" },
-      createMiniButton("Escolher pasta", async () => {
-        await chooseFolderInto(refs.projectPath);
-      }),
-      createMiniButton("Criar projeto em branco", async () => {
-        await createProject();
-      }),
-      createMiniButton("Carregar projeto existente", async () => {
-        const picked = await chooseFolderInto(refs.projectPath);
-        if (picked) {
-          await loadProject();
-        }
-      })
-    )
+    el("div", { className: "compact-actions" }, ...actions)
   );
 }
 
@@ -4037,6 +4279,26 @@ function suggestClipFileName(pad) {
   return ensureWavFileName(getNextSequentialSoundBaseName());
 }
 
+function buildUniqueProjectSoundPath(fileName) {
+  const desired = ensureWavFileName(fileName || suggestClipFileName());
+  const existing = new Set((state.project?.sounds || []).map((entry) => String(entry.path || "").trim().toLowerCase()));
+  if (!existing.has(desired.toLowerCase())) {
+    return desired;
+  }
+
+  const extensionMatch = desired.match(/(\.[^.]+)$/);
+  const extension = extensionMatch ? extensionMatch[1] : ".wav";
+  const baseName = desired.slice(0, -extension.length);
+  let counter = 1;
+  while (true) {
+    const candidate = `${baseName}_${String(counter).padStart(2, "0")}${extension}`;
+    if (!existing.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+    counter += 1;
+  }
+}
+
 function getNextSequentialSoundBaseName() {
   const names = [
     ...(state.project?.sounds || []).map((sound) => sound.path || sound.name || ""),
@@ -4091,6 +4353,10 @@ function normalizeAudioLibraryEntry(entry) {
     id: String(entry.id || createLibraryEntryId()),
     name: String(entry.name || fileStem(soundFile)),
     soundFile,
+    bucket: String(entry.bucket || ""),
+    storagePath: String(entry.storagePath || ""),
+    mimeType: String(entry.mimeType || ""),
+    size: Number(entry.size) || 0,
   };
 }
 
@@ -4100,6 +4366,10 @@ function saveSoundToLibrary(soundFile, options = {}) {
     id: createLibraryEntryId(),
     name: options.name || fileStem(soundFile),
     soundFile,
+    bucket: options.bucket,
+    storagePath: options.storagePath,
+    mimeType: options.mimeType,
+    size: options.size,
   });
   if (!normalized) return;
 
@@ -4125,6 +4395,14 @@ async function applyLibrarySoundToPad(entry, pad) {
   }
   const index = clampIndex(state.selectedSoundIndex, pad.sounds.length);
   pad.sounds[index].soundFile = entry.soundFile;
+  upsertProjectSoundEntry({
+    path: entry.soundFile,
+    name: entry.name,
+    size: entry.size,
+    bucket: entry.bucket,
+    storagePath: entry.storagePath,
+    mimeType: entry.mimeType,
+  });
   renderSoundEditor(pad);
   renderGrid();
   renderStats();
@@ -4136,6 +4414,39 @@ async function applyLibrarySoundToPad(entry, pad) {
   } catch (error) {
     setStatus(error.message || "Falha ao aplicar o audio ao pad.", "error");
   }
+}
+
+function syncAudioLibraryFromProject(project = state.project) {
+  if (!project) {
+    state.audioLibrary = [];
+    return;
+  }
+  const storedEntries = loadAudioLibrary(project.projectPath);
+  if (!isCloudProject(project)) {
+    state.audioLibrary = storedEntries;
+    return;
+  }
+
+  const projectEntries = (project.sounds || [])
+    .map((entry) =>
+      normalizeAudioLibraryEntry({
+        id: String(entry.storagePath || entry.path || createLibraryEntryId()),
+        name: entry.name || fileStem(entry.path),
+        soundFile: entry.path,
+        bucket: entry.bucket,
+        storagePath: entry.storagePath,
+        mimeType: entry.mimeType,
+        size: entry.size,
+      })
+    )
+    .filter(Boolean);
+
+  const merged = [...projectEntries];
+  storedEntries.forEach((entry) => {
+    if (merged.some((item) => item.soundFile === entry.soundFile)) return;
+    merged.push(entry);
+  });
+  state.audioLibrary = merged;
 }
 
 function fileStem(path) {
@@ -4287,7 +4598,6 @@ async function initializeSupabaseLedLibrary() {
   state.ledLibrarySyncError = "";
   state.ledLibrarySyncing = true;
   try {
-    await signInAnonymouslyIfNeeded();
     await hydrateSupabaseUser();
     await refreshRemoteLedLibrary({ quiet: true });
   } catch (error) {
@@ -4300,15 +4610,14 @@ async function initializeSupabaseLedLibrary() {
 
 async function hydrateSupabaseUser() {
   try {
-    const supabase = getSupabaseClient();
-    const {
-      data: { user },
-      error,
-    } = await supabase.auth.getUser();
-    if (error) throw error;
+    const user = await getCurrentUser();
+    state.authUser = user;
     state.supabaseUserId = String(user?.id || "");
+    renderAuthPanel();
   } catch (error) {
+    state.authUser = null;
     state.supabaseUserId = "";
+    renderAuthPanel();
     throw error;
   }
 }
@@ -4552,6 +4861,526 @@ function sortCommunityLedLibraryEntries(entries) {
 function formatRatingValue(value) {
   const numeric = Number(value) || 0;
   return numeric.toFixed(1);
+}
+
+function renderCloudProjectsPanel() {
+  if (!refs.cloudProjectShell || !refs.cloudProjectStatus || !refs.cloudProjectList) return;
+
+  const configured = hasSupabaseConfig();
+  const signedIn = Boolean(state.authUser);
+  const visible = configured && signedIn;
+  refs.cloudProjectShell.hidden = !visible;
+  refs.cloudProjectShell.style.display = visible ? "" : "none";
+  if (!visible) {
+    refs.cloudProjectList.replaceChildren();
+    return;
+  }
+
+  const displayName = getAuthDisplayName(state.authUser);
+  if (refs.cloudProjectTitle) {
+    refs.cloudProjectTitle.textContent = `Meus projetos`;
+  }
+  if (refs.cloudProjectSubtitle) {
+    refs.cloudProjectSubtitle.textContent = state.project
+      ? `${displayName}, voce continua logado. Abra outro projeto ou siga editando o atual.`
+      : `${displayName}, escolha um projeto para abrir ou crie um novo para comecar.`;
+  }
+
+  if (refs.cloudProjectName) {
+    const currentName = refs.cloudProjectName.value.trim();
+    if (!currentName || isCloudProject()) {
+      refs.cloudProjectName.value = state.project?.projectName || state.project?.info?.title || "";
+    }
+  }
+
+  if (refs.cloudProjectCreate) refs.cloudProjectCreate.disabled = !signedIn;
+  if (refs.cloudProjectSave) refs.cloudProjectSave.disabled = !signedIn || !isCloudProject();
+  if (refs.cloudProjectRefresh) refs.cloudProjectRefresh.disabled = !signedIn || state.cloudProjectsLoading;
+
+  const statusMessage = state.cloudProjectsLoading
+    ? "Carregando seus projetos online..."
+    : state.cloudProjectsError
+      ? state.cloudProjectsError
+      : isCloudProject()
+        ? `Projeto online atual: ${state.project.projectName || state.project.info.title || "Sem nome"}.`
+        : "Crie um projeto online novo ou abra um que ja esta salvo na sua conta.";
+  refs.cloudProjectStatus.textContent = statusMessage;
+  refs.cloudProjectStatus.classList.remove("is-error", "is-success");
+  if (state.cloudProjectsError) {
+    refs.cloudProjectStatus.classList.add("is-error");
+  } else if (signedIn && !state.cloudProjectsLoading) {
+    refs.cloudProjectStatus.classList.add("is-success");
+  }
+
+  if (!state.cloudProjects.length) {
+    refs.cloudProjectList.replaceChildren(
+      createEmptyState("Nenhum projeto online ainda. Crie o primeiro usando o campo acima.")
+    );
+    return;
+  }
+
+  refs.cloudProjectList.replaceChildren(...state.cloudProjects.map((record) => createCloudProjectCard(record)));
+}
+
+function createCloudProjectCard(record) {
+  const isCurrent = state.project?.projectId === record.id;
+  const card = el("article", {
+    className: `cloud-project-card${isCurrent ? " is-current" : ""}`,
+  });
+  card.append(
+    el(
+      "div",
+      { className: "cloud-project-card-head" },
+      el("strong", { textContent: record.name || "Projeto sem nome" }),
+      isCurrent ? el("span", { className: "pill pill-compact", textContent: "Aberto" }) : null
+    ),
+    el(
+      "div",
+      { className: "cloud-project-card-meta" },
+      el("span", { textContent: `Atualizado ${formatDateTime(record.updated_at || record.created_at)}` }),
+      el("span", { textContent: `${countMappedPadsInCloudRecord(record)} pad(s) usado(s)` })
+    ),
+    el(
+      "div",
+      { className: "compact-actions" },
+      createMiniButton(isCurrent ? "Reabrir" : "Abrir", () => {
+        openCloudProjectRecord(record);
+      }),
+      createMiniButton("Excluir", async () => {
+        await deleteCloudProjectFromUi(record.id);
+      })
+    )
+  );
+  return card;
+}
+
+async function refreshCloudProjects(options = {}) {
+  if (!hasSupabaseConfig()) {
+    state.cloudProjects = [];
+    state.cloudProjectsError = "Supabase nao configurado.";
+    renderCloudProjectsPanel();
+    return [];
+  }
+  if (!state.authUser) {
+    state.cloudProjects = [];
+    state.cloudProjectsLoading = false;
+    state.cloudProjectsError = "";
+    renderCloudProjectsPanel();
+    return [];
+  }
+
+  state.cloudProjectsLoading = true;
+  state.cloudProjectsError = "";
+  renderCloudProjectsPanel();
+
+  try {
+    state.cloudProjects = await fetchOwnProjects();
+    state.cloudProjectsError = "";
+    renderCloudProjectsPanel();
+    if (options.restoreRemembered !== false) {
+      maybeRestoreRememberedCloudProject();
+    }
+    if (!options.quiet) {
+      setStatus("Projetos online atualizados.", "success");
+    }
+    return state.cloudProjects;
+  } catch (error) {
+    state.cloudProjects = [];
+    state.cloudProjectsError = error.message || "Falha ao carregar projetos online.";
+    renderCloudProjectsPanel();
+    if (!options.quiet) {
+      setStatus(state.cloudProjectsError, "error");
+    }
+    return [];
+  } finally {
+    state.cloudProjectsLoading = false;
+    renderCloudProjectsPanel();
+  }
+}
+
+async function createCloudProjectFromUi() {
+  if (!hasSupabaseConfig()) {
+    setStatus("Configure o Supabase antes de criar projetos online.", "error");
+    return false;
+  }
+  if (!state.authUser) {
+    setStatus("Entre com sua conta para criar um projeto online.", "error");
+    return false;
+  }
+
+  const name = String(refs.cloudProjectName?.value || "").trim() || "Novo UniPack";
+  const blankProject = buildBlankCloudProject(name);
+  try {
+    setStatus("Criando projeto online...");
+    const record = await createCloudProjectRecord(name, buildCloudProjectData(blankProject));
+    state.cloudProjects = [record, ...state.cloudProjects.filter((entry) => entry.id !== record.id)];
+    openCloudProjectRecord(record);
+    renderCloudProjectsPanel();
+    setStatus(`Projeto online "${record.name}" criado com sucesso.`, "success");
+    return true;
+  } catch (error) {
+    setStatus(error.message || "Falha ao criar o projeto online.", "error");
+    return false;
+  }
+}
+
+async function saveCurrentProjectOnline(options = {}) {
+  if (!state.project) {
+    const error = new Error("Nenhum projeto carregado para salvar.");
+    if (!options.quiet) {
+      setStatus(error.message, "error");
+    }
+    if (options.rethrow) throw error;
+    return false;
+  }
+  if (!hasSupabaseConfig()) {
+    const error = new Error("Supabase nao configurado para salvar projetos online.");
+    if (!options.quiet) {
+      setStatus(error.message, "error");
+    }
+    if (options.rethrow) throw error;
+    return false;
+  }
+  if (!state.authUser) {
+    const error = new Error("Entre com sua conta para salvar projetos online.");
+    if (!options.quiet) {
+      setStatus(error.message, "error");
+    }
+    if (options.rethrow) throw error;
+    return false;
+  }
+
+  const desiredName = String(refs.cloudProjectName?.value || state.project.projectName || state.project.info.title || "")
+    .trim() || "Novo UniPack";
+  state.project.projectName = desiredName;
+  if (!String(state.project.info?.title || "").trim()) {
+    state.project.info.title = desiredName;
+  }
+
+  try {
+    if (!options.quiet) {
+      setStatus("Salvando projeto online...");
+    }
+    const payload = buildCloudProjectData(state.project);
+    const record = state.project.projectId
+      ? await updateCloudProjectRecord(state.project.projectId, desiredName, payload)
+      : await createCloudProjectRecord(desiredName, payload);
+    const normalizedProject = normalizeCloudProjectRecord(record);
+    const preservedPadKey = state.selectedPadKey;
+    const preservedSoundIndex = state.selectedSoundIndex;
+    const preservedLedIndex = state.selectedLedIndex;
+    state.project = normalizedProject;
+    syncAudioLibraryFromProject(state.project);
+    rememberProjectPath(state.project.projectPath);
+    state.currentChain = clampChain(state.currentChain, getChainCount());
+    state.selectedPadKey = preservedPadKey;
+    if (state.selectedPadKey && !state.project.pads[state.selectedPadKey]) {
+      state.selectedPadKey = null;
+      pickInitialPad();
+    }
+    state.selectedSoundIndex = preservedSoundIndex;
+    state.selectedLedIndex = preservedLedIndex;
+    state.cloudProjects = [record, ...state.cloudProjects.filter((entry) => entry.id !== record.id)];
+    renderAll();
+    if (!options.quiet) {
+      setStatus(`Projeto online "${desiredName}" salvo com sucesso.`, "success");
+    }
+    return true;
+  } catch (error) {
+    if (!options.quiet) {
+      setStatus(error.message || "Falha ao salvar projeto online.", "error");
+    }
+    if (options.rethrow) throw error;
+    return false;
+  }
+}
+
+function openCloudProjectRecord(record) {
+  state.project = normalizeCloudProjectRecord(record);
+  syncAudioLibraryFromProject(state.project);
+  state.audioLibraryPickerOpen = false;
+  state.ledLibraryPickerOpen = false;
+  refs.projectPath.value = "";
+  rememberProjectPath(state.project.projectPath);
+  resetAudioClipEditor();
+  state.currentChain = clampChain(1, getChainCount());
+  pickInitialPad();
+  resetSelectedEditors();
+  renderAll();
+  setStatus(`Projeto online "${record.name}" carregado.`, "success");
+}
+
+async function deleteCloudProjectFromUi(projectId) {
+  const record = state.cloudProjects.find((entry) => entry.id === projectId);
+  if (!record) return;
+  const confirmed = window.confirm(`Deseja excluir o projeto online "${record.name}"?`);
+  if (!confirmed) return;
+
+  try {
+    await deleteCloudProjectRecord(projectId);
+    state.cloudProjects = state.cloudProjects.filter((entry) => entry.id !== projectId);
+    if (state.project?.projectId === projectId) {
+      state.project = null;
+      state.audioLibrary = [];
+      refs.projectPath.value = "";
+      clearRememberedProjectPath();
+      resetAudioClipEditor();
+      renderAll();
+    } else {
+      renderCloudProjectsPanel();
+    }
+    setStatus(`Projeto online "${record.name}" removido.`, "success");
+  } catch (error) {
+    setStatus(error.message || "Falha ao remover o projeto online.", "error");
+  }
+}
+
+function buildBlankCloudProject(name) {
+  const projectName = String(name || "").trim() || "Novo UniPack";
+  return normalizeProject({
+    storageMode: "cloud",
+    projectId: "",
+    projectPath: "",
+    projectName,
+    info: {
+      title: projectName,
+      producerName: "",
+      buttonX: "8",
+      buttonY: "8",
+      chain: "8",
+      squareButton: "true",
+      landscape: "false",
+      website: "",
+    },
+    infoExtra: [],
+    pads: {},
+    sounds: [],
+    autoPlay: [],
+  });
+}
+
+function buildCloudProjectData(project) {
+  return {
+    storageMode: "cloud",
+    info: structuredClone(project.info || {}),
+    infoExtra: structuredClone(project.infoExtra || []),
+    pads: structuredClone(project.pads || {}),
+    sounds: structuredClone(project.sounds || []),
+    autoPlay: structuredClone(project.autoPlay || []),
+  };
+}
+
+function normalizeCloudProjectRecord(record) {
+  const normalized = normalizeProject(record?.project_data || {});
+  normalized.storageMode = "cloud";
+  normalized.projectId = String(record?.id || "");
+  normalized.projectName = String(record?.name || normalized.info?.title || "Novo UniPack");
+  normalized.projectPath = `cloud:${normalized.projectId}`;
+  if (!String(normalized.info?.title || "").trim()) {
+    normalized.info.title = normalized.projectName;
+  }
+  return normalized;
+}
+
+function maybeRestoreRememberedCloudProject() {
+  const remembered = loadRememberedProjectPath();
+  if (!remembered.startsWith("cloud:")) return;
+  const projectId = remembered.slice("cloud:".length).trim();
+  if (!projectId) return;
+  if (state.project?.projectId === projectId) return;
+  const rememberedRecord = state.cloudProjects.find((entry) => entry.id === projectId);
+  if (rememberedRecord) {
+    openCloudProjectRecord(rememberedRecord);
+    return;
+  }
+  clearRememberedProjectPath();
+}
+
+function countMappedPadsInCloudRecord(record) {
+  const pads = Object.values(record?.project_data?.pads || {});
+  return pads.filter((pad) => (pad?.sounds?.length || 0) > 0 || (pad?.ledAnimations?.length || 0) > 0).length;
+}
+
+function isCloudProject(project = state.project) {
+  return Boolean(project && (project.storageMode === "cloud" || String(project.projectPath || "").startsWith("cloud:")));
+}
+
+function formatDateTime(value) {
+  if (!value) return "agora";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "agora";
+  return parsed.toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+async function initializeAuth() {
+  if (!hasSupabaseConfig()) {
+    renderAuthPanel("Preencha o Supabase para ativar login com email e senha.");
+    renderCloudProjectsPanel();
+    return;
+  }
+  try {
+    const session = await getCurrentSession();
+    state.authUser = session?.user || (await getCurrentUser());
+    state.supabaseUserId = String(state.authUser?.id || "");
+    renderAuthPanel();
+    renderCloudProjectsPanel();
+    if (state.authUser) {
+      await refreshCloudProjects({ quiet: true });
+    }
+    onAuthStateChange((_event, sessionData) => {
+      state.authUser = sessionData?.user || null;
+      state.supabaseUserId = String(state.authUser?.id || "");
+      renderAuthPanel();
+      state.cloudProjectsError = "";
+      if (!state.authUser) {
+        state.cloudProjects = [];
+        if (isCloudProject()) {
+          state.project = null;
+          state.audioLibrary = [];
+          refs.projectPath.value = "";
+          clearRememberedProjectPath();
+          resetAudioClipEditor();
+          renderAll();
+        } else {
+          renderCloudProjectsPanel();
+        }
+      } else {
+        void refreshCloudProjects({ quiet: true });
+      }
+      renderLedLibraryPanel();
+    });
+  } catch (error) {
+    state.authUser = null;
+    state.supabaseUserId = "";
+    renderAuthPanel(error.message || "Falha ao iniciar o login.");
+    renderCloudProjectsPanel();
+  }
+}
+
+function renderAuthPanel(message = "") {
+  const hasUser = Boolean(state.authUser);
+  renderSessionLayout();
+  refs.authSigninTab?.classList.toggle("is-active", state.authMode === "signin");
+  refs.authSignupTab?.classList.toggle("is-active", state.authMode === "signup");
+  if (refs.authTabs) {
+    refs.authTabs.hidden = hasUser;
+    refs.authTabs.style.display = hasUser ? "none" : "";
+  }
+  if (refs.authGuestPanel) {
+    refs.authGuestPanel.hidden = hasUser;
+  }
+  if (refs.authUserPanel) {
+    refs.authUserPanel.hidden = !hasUser;
+  }
+  if (refs.authSubmit) {
+    refs.authSubmit.textContent = state.authMode === "signup" ? "Criar conta" : "Entrar";
+  }
+  if (refs.authStatus) {
+    refs.authStatus.textContent = message || (
+      state.authMode === "signup"
+        ? "Crie sua conta com email e senha. Voce vai receber um email para confirmar."
+        : "Use email e senha para entrar no site."
+    );
+  }
+  if (refs.authUserName) {
+    refs.authUserName.textContent = hasUser ? getAuthDisplayName(state.authUser) : "Usuario";
+  }
+  if (refs.authUserEmail) {
+    refs.authUserEmail.textContent = state.authUser?.email || "Sem sessao";
+  }
+  if (refs.authUserMeta) {
+    refs.authUserMeta.textContent = hasUser
+      ? getAuthUserMetaText(state.authUser)
+      : "Entre para salvar seus projetos e publicar animacoes.";
+  }
+}
+
+function getAuthDisplayName(user) {
+  const rawName =
+    String(user?.user_metadata?.name || user?.user_metadata?.full_name || user?.user_metadata?.display_name || "").trim();
+  if (rawName) {
+    return rawName;
+  }
+  const email = String(user?.email || "").trim();
+  const localPart = email.split("@")[0] || "Usuario";
+  const cleaned = localPart.replace(/[._-]+/g, " ").trim();
+  return cleaned
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Usuario";
+}
+
+function getAuthUserMetaText(user) {
+  const isConfirmed = Boolean(user?.email_confirmed_at || user?.confirmed_at);
+  if (!isConfirmed) {
+    return "Conta criada. Confirme seu email para ativar totalmente o acesso.";
+  }
+  return "Email confirmado. Sua conta esta pronta para salvar projetos e publicar animacoes.";
+}
+
+async function handleAuthSubmit() {
+  if (!hasSupabaseConfig()) {
+    renderAuthPanel("Configure o Supabase antes de ativar o login.");
+    return;
+  }
+  const email = String(refs.authEmail?.value || "").trim();
+  const password = String(refs.authPassword?.value || "");
+  if (!email || !password) {
+    renderAuthPanel("Preencha email e senha.");
+    return;
+  }
+
+  try {
+    if (state.authMode === "signup") {
+      const redirectTo = `${window.location.origin}${window.location.pathname}`;
+      await signUpWithEmail(email, password, redirectTo);
+      refs.authPassword.value = "";
+      renderAuthPanel("Conta criada. Verifique seu email e clique no link de confirmacao.");
+      setStatus("Conta criada. Um email de confirmacao foi enviado.", "success");
+      return;
+    }
+
+    await signInWithEmail(email, password);
+    refs.authPassword.value = "";
+    await hydrateSupabaseUser();
+    renderAuthPanel("Login realizado com sucesso.");
+    setStatus("Login realizado com sucesso.", "success");
+  } catch (error) {
+    renderAuthPanel(error.message || "Falha ao autenticar.");
+    setStatus(error.message || "Falha ao autenticar.", "error");
+  }
+}
+
+async function handleAuthSignOut() {
+  try {
+    await signOutCurrentUser();
+    state.authUser = null;
+    state.supabaseUserId = "";
+    state.cloudProjects = [];
+    state.cloudProjectsLoading = false;
+    state.cloudProjectsError = "";
+    if (isCloudProject()) {
+      state.project = null;
+      state.audioLibrary = [];
+      refs.projectPath.value = "";
+      clearRememberedProjectPath();
+      resetAudioClipEditor();
+      renderAll();
+    }
+    renderAuthPanel("Sessao encerrada.");
+    renderCloudProjectsPanel();
+    setStatus("Sessao encerrada.", "success");
+  } catch (error) {
+    renderAuthPanel(error.message || "Falha ao sair.");
+    setStatus(error.message || "Falha ao sair.", "error");
+  }
 }
 
 function loadRememberedProjectPath() {

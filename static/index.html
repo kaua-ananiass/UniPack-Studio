@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <div class="app-shell">
+    <div id="app-shell" class="app-shell">
       <header class="hero">
         <div class="hero-brand">
           <span class="brand-chip">Unipack Studio</span>
@@ -17,22 +17,76 @@
           </div>
         </div>
         <div class="hero-actions">
-          <label class="field grow">
-            <span>Pasta do projeto</span>
-            <div class="input-with-button">
-              <input id="project-path" type="text" />
-              <button id="pick-project-path" type="button" class="mini">Escolher</button>
+          <section class="auth-shell panel">
+            <div id="auth-tabs" class="mini-tabs auth-tabs">
+              <button id="auth-signin-tab" class="mini-tab is-active" type="button">Entrar</button>
+              <button id="auth-signup-tab" class="mini-tab" type="button">Criar conta</button>
             </div>
-          </label>
-          <div class="button-row">
-            <button id="create-project">Criar projeto</button>
-            <button id="load-project" class="primary">Carregar projeto</button>
-            <button id="save-project">Salvar projeto</button>
-            <button id="export-project">Exportar .zip</button>
-          </div>
-          <p id="status" class="status">Pronto para carregar.</p>
+            <div id="auth-guest-panel" class="auth-panel stack">
+              <label class="field">
+                <span>Email</span>
+                <input id="auth-email" type="email" autocomplete="email" />
+              </label>
+              <label class="field">
+                <span>Senha</span>
+                <input id="auth-password" type="password" autocomplete="current-password" />
+              </label>
+              <div class="button-row auth-row">
+                <button id="auth-submit" type="button" class="primary">Entrar</button>
+              </div>
+              <p id="auth-status" class="auth-status">Use email e senha para entrar no site.</p>
+            </div>
+            <div id="auth-user-panel" class="auth-panel stack" hidden>
+              <div class="auth-user-card">
+                <strong id="auth-user-name">Usuario</strong>
+                <span id="auth-user-email" class="muted">Sem sessao</span>
+                <span id="auth-user-meta" class="muted">Entre para salvar seus projetos e publicar animacoes.</span>
+              </div>
+              <div class="button-row auth-row">
+                <button id="auth-signout" type="button">Sair</button>
+              </div>
+            </div>
+          </section>
+          <section id="project-toolbar-shell" class="project-toolbar-shell" hidden>
+            <label class="field grow">
+              <span>Pasta do projeto</span>
+              <div class="input-with-button">
+                <input id="project-path" type="text" />
+                <button id="pick-project-path" type="button" class="mini">Escolher</button>
+              </div>
+            </label>
+            <div class="button-row">
+              <button id="create-project">Criar projeto</button>
+              <button id="load-project" class="primary">Carregar projeto</button>
+              <button id="save-project">Salvar projeto</button>
+              <button id="export-project">Exportar .zip</button>
+            </div>
+            <p id="status" class="status">Pronto para carregar.</p>
+          </section>
         </div>
       </header>
+
+      <section id="cloud-project-shell" class="panel cloud-project-shell" hidden>
+        <div class="panel-title-row">
+          <div>
+            <h2 id="cloud-project-title">Meus projetos</h2>
+            <p id="cloud-project-subtitle" class="panel-subtitle">Crie, abra e salve seus projetos online na sua conta.</p>
+          </div>
+        </div>
+        <div class="cloud-project-toolbar">
+          <label class="field grow">
+            <span>Nome do projeto online</span>
+            <input id="cloud-project-name" type="text" />
+          </label>
+          <div class="button-row">
+            <button id="cloud-project-create" type="button">Novo online</button>
+            <button id="cloud-project-save" type="button">Salvar online</button>
+            <button id="cloud-project-refresh" type="button" class="mini">Atualizar lista</button>
+          </div>
+        </div>
+        <div id="cloud-project-status" class="status">Entre para salvar projetos online.</div>
+        <div id="cloud-project-list" class="cloud-project-list"></div>
+      </section>
 
       <div class="sr-only" aria-hidden="true">
         <span id="project-title-pill"></span>
