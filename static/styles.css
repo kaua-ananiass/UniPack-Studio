@@ -826,7 +826,7 @@ button.mini {
 
 .led-preview-tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   justify-content: stretch;
   width: 100%;
   align-items: stretch;
@@ -835,8 +835,8 @@ button.mini {
 .led-preview-tabs .mini-tab {
   width: 100%;
   min-width: 0;
-  padding: 0 8px;
-  font-size: 0.82rem;
+  padding: 0 6px;
+  font-size: 0.78rem;
 }
 
 .editor-media-panel {
@@ -864,6 +864,127 @@ button.mini {
 .editor-media-library .audio-library-list {
   width: 100%;
   max-height: 360px;
+}
+
+.led-studio-shell {
+  gap: 14px;
+}
+
+.led-studio-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.led-studio-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.led-studio-actions {
+  justify-content: flex-end;
+}
+
+.led-studio-preview-wrap {
+  justify-items: center;
+  gap: 12px;
+}
+
+.led-studio-helper {
+  text-align: center;
+  max-width: 42ch;
+}
+
+.led-studio-launchpad {
+  width: fit-content;
+  margin: 0 auto;
+}
+
+.led-studio-launchpad .launchpad-cell {
+  cursor: pointer;
+}
+
+.led-studio-frame-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.led-studio-frame-actions {
+  justify-content: flex-end;
+}
+
+.led-studio-frame-carousel {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 2px 10px;
+  scrollbar-width: thin;
+}
+
+.led-studio-frame-strip {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 14px;
+  width: max-content;
+  min-width: 100%;
+}
+
+.led-frame-card {
+  flex: 0 0 168px;
+  min-height: 204px;
+  padding: 14px 12px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 6px;
+  text-align: center;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.led-frame-card strong {
+  font-size: 0.96rem;
+}
+
+.led-frame-card span,
+.led-frame-card small {
+  color: var(--muted);
+}
+
+.led-frame-card.is-active {
+  border-color: rgba(255, 209, 102, 0.58);
+  box-shadow: 0 14px 32px rgba(255, 209, 102, 0.12), 0 0 0 1px rgba(255, 209, 102, 0.18);
+  background: rgba(255, 209, 102, 0.08);
+  transform: translateY(-4px) scale(1.03);
+}
+
+.led-frame-mini-preview {
+  margin: 0 auto 4px;
+}
+
+.led-frame-mini-preview .launchpad-cell {
+  border-radius: 4px;
+}
+
+.led-frame-card small {
+  max-width: 13ch;
+}
+
+.led-studio-inline-tools {
+  align-content: start;
+}
+
+.led-studio-inline-actions {
+  justify-content: flex-start;
 }
 
 .led-controls .field span {
@@ -1189,6 +1310,16 @@ button.mini {
   .led-controls {
     width: min(100%, 340px);
   }
+
+  .led-studio-topbar,
+  .led-studio-frame-toolbar {
+    align-items: stretch;
+  }
+
+  .led-studio-actions,
+  .led-studio-frame-actions {
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1245,6 +1376,17 @@ button.mini {
   .led-preview-pane,
   .led-controls {
     max-width: 300px;
+  }
+
+  .led-studio-frame-strip {
+    justify-content: flex-start;
+    min-width: max-content;
+  }
+
+  .led-studio-actions,
+  .led-studio-frame-actions,
+  .led-studio-inline-actions {
+    justify-content: stretch;
   }
 
   .led-preview-tabs {

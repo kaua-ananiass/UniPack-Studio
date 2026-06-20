@@ -4,6 +4,8 @@ import argparse
 import base64
 import json
 import mimetypes
+import os
+import shutil
 import subprocess
 import tempfile
 import wave
@@ -17,7 +19,7 @@ from unipack_format import create_empty_project, export_project_zip, parse_proje
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-DEFAULT_PROJECT_PATH = str(BASE_DIR.parent)
+DEFAULT_PROJECT_PATH = str(Path(os.environ.get("UNIPACK_DEFAULT_PROJECT_PATH") or BASE_DIR.parent).expanduser().resolve())
 
 
 class UniPackEditorHandler(SimpleHTTPRequestHandler):
@@ -76,6 +78,8 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
         params = parse_qs(parsed.query)
         initial_path = params.get("initial", [DEFAULT_PROJECT_PATH])[0]
         try:
+            if os.name != "posix" or not shutil.which("osascript"):
+                raise RuntimeError("Selecao de pasta local disponivel apenas no editor rodando no macOS.")
             initial_dir = Path(initial_path).expanduser()
             if not initial_dir.exists():
                 initial_dir = Path.home()
@@ -474,8 +478,8 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Editor local para projetos UniPad")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), UniPackEditorHandler)

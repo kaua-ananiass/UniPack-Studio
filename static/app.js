@@ -26,6 +26,7 @@ const state = {
   audio: new Audio(),
   audioObjectUrl: "",
   audioClipEditor: createInitialAudioClipEditorState(),
+  ledStudioEditor: createInitialLedStudioEditorState(),
 };
 
 state.audio.preload = "auto";
@@ -619,6 +620,9 @@ function renderViewNavigation() {
   const isAudio = state.currentView === "audio";
   const isLed = state.currentView === "led";
   const isLibrary = state.currentView === "library";
+  if (!isLed) {
+    stopLedPreview("studio");
+  }
   refs.mainViewShell.hidden = !isEditor;
   refs.mainViewShell.style.display = isEditor ? "" : "none";
   if (refs.audioSidebar) {
@@ -1126,7 +1130,7 @@ function buildLedEditorSections(pad) {
   const animation = pad.ledAnimations[index];
   ensureLedAnimationUi(animation, pad);
   const focus = el("div", { className: "editor-focus stack" });
-  const isLibrarySubview = state.editorMediaSubview === "library";
+  const isPreviewSubview = state.editorMediaSubview === "preview";
   const controls = el(
     "div",
     { className: "led-controls stack" },
@@ -1185,7 +1189,7 @@ function buildLedEditorSections(pad) {
       "div",
       { className: "led-compact-layout" },
       createEditorMediaTabPanel(pad, animation, getPreviewRatePercent(getPadPreviewKey(pad, index))),
-      ...(isLibrarySubview ? [] : [controls])
+      ...(isPreviewSubview ? [controls] : [])
     )
   );
 
@@ -1195,15 +1199,68 @@ function buildLedEditorSections(pad) {
 
 function renderLedStudioPanel() {
   if (!refs.ledStudioContent) return;
-  if (refs.ledStudioPadPill) refs.ledStudioPadPill.textContent = "";
-  if (refs.ledStudioAddButton) refs.ledStudioAddButton.hidden = true;
+  stopLedPreview("studio");
+  if (!state.project) {
+    refs.ledStudioContent.replaceChildren(createEmptyState("Carregue um projeto para criar a animacao de LED."));
+    return;
+  }
+
+  const pad = getSelectedPad();
+  if (!pad) {
+    refs.ledStudioContent.replaceChildren(
+      createEmptyState("Selecione um pad na aba Editor para montar a animacao dele aqui.")
+    );
+    return;
+  }
+
+  ensureLedStudioDraftForPad(pad);
+  const studio = state.ledStudioEditor;
+  const frame = getCurrentLedStudioFrame();
+  const launchpad = createLaunchpadPreviewGrid("is-studio", 30);
+  launchpad.classList.add("led-studio-launchpad");
+  bindLedStudioLaunchpad(launchpad);
+
+  if (studio.isPlaying) {
+    const animation = buildAnimationFromLedStudio(studio);
+    startLedPreview(launchpad, animation, studio.selectedColor, {
+      loop: true,
+      group: "studio",
+    });
+  } else {
+    paintLedStudioFrame(launchpad, frame);
+  }
+
   refs.ledStudioContent.replaceChildren(
     el(
       "div",
-      { className: "editor-focus stack" },
-      createEmptyState("O editor dedicado de LED ainda esta em construcao.")
+      { className: "editor-focus stack led-studio-shell" },
+      createLedStudioHeader(pad, studio),
+      createLedStudioControlGrid(pad, studio),
+      el(
+        "div",
+        { className: "editor-preview stack led-studio-preview-wrap" },
+        el("span", {
+          className: "muted led-studio-helper",
+          textContent: "Clique em um pad do launchpad para ligar ou desligar no frame atual.",
+        }),
+        launchpad
+      ),
+      createLedStudioFrameNavigator(studio),
+      createLedStudioFrameStrip(studio)
     )
   );
+
+  window.requestAnimationFrame(() => {
+    syncLedStudioActiveFramePosition();
+  });
+}
+
+function syncLedStudioActiveFramePosition() {
+  const carousel = refs.ledStudioContent?.querySelector(".led-studio-frame-carousel");
+  const activeCard = refs.ledStudioContent?.querySelector(".led-frame-card.is-active");
+  if (!carousel || !activeCard) return;
+  const targetLeft = activeCard.offsetLeft - carousel.clientWidth / 2 + activeCard.clientWidth / 2;
+  carousel.scrollLeft = Math.max(0, targetLeft);
 }
 
 function renderLedLibraryPanel() {
@@ -1216,6 +1273,402 @@ function renderLedLibraryPanel() {
       createEmptyState("A biblioteca de animacoes ainda esta em construcao.")
     )
   );
+}
+
+function createEmptyLedStudioFrame(duration = 90) {
+  return {
+    id: createLibraryEntryId(),
+    duration: Math.max(1, parseIntSafe(duration, 90)),
+    cells: {},
+  };
+}
+
+function ensureLedStudioDraftForPad(pad) {
+  const targetIndex = resolveLedStudioAnimationIndex(pad);
+  if (state.ledStudioEditor.padKey === pad.key && state.ledStudioEditor.animationIndex === targetIndex) {
+    if (!state.ledStudioEditor.frames.length) {
+      state.ledStudioEditor.frames = [createEmptyLedStudioFrame()];
+      state.ledStudioEditor.currentFrameIndex = 0;
+    }
+    state.ledStudioEditor.currentFrameIndex = clampIndex(
+      state.ledStudioEditor.currentFrameIndex,
+      state.ledStudioEditor.frames.length
+    );
+    return;
+  }
+
+  const sourceAnimation = pad.ledAnimations[targetIndex] || null;
+  const frames = sourceAnimation ? buildLedStudioFramesFromAnimation(sourceAnimation) : [createEmptyLedStudioFrame()];
+  state.ledStudioEditor = {
+    padKey: pad.key,
+    animationIndex: targetIndex,
+    currentFrameIndex: 0,
+    frames,
+    selectedColor: sourceAnimation?.previewColor || inferAnimationColor(sourceAnimation || { events: [] }) || "#8453FD",
+    loop: sourceAnimation?.loop ?? 1,
+    isPlaying: false,
+  };
+}
+
+function resolveLedStudioAnimationIndex(pad) {
+  if (!pad?.ledAnimations?.length) return pad?.ledAnimations?.length || 0;
+  return clampIndex(state.selectedLedIndex, pad.ledAnimations.length);
+}
+
+function buildLedStudioFramesFromAnimation(animation) {
+  const active = new Map();
+  const frames = [];
+
+  (animation.events || []).forEach((event) => {
+    if (event.type === "on" && isNumericCoord(event.x) && isNumericCoord(event.y)) {
+      active.set(`${Number(event.x)}:${Number(event.y)}`, normalizeColor(resolveLedEventColor(event)));
+      return;
+    }
+    if (event.type === "off" && isNumericCoord(event.x) && isNumericCoord(event.y)) {
+      active.delete(`${Number(event.x)}:${Number(event.y)}`);
+      return;
+    }
+    if (event.type === "delay") {
+      frames.push({
+        id: createLibraryEntryId(),
+        duration: Math.max(1, Number(event.ms) || 90),
+        cells: Object.fromEntries(active),
+      });
+    }
+  });
+
+  return frames.length ? frames : [createEmptyLedStudioFrame(inferAnimationSpeed(animation))];
+}
+
+function buildAnimationFromLedStudio(studio) {
+  const frames = Array.isArray(studio.frames) && studio.frames.length ? studio.frames : [createEmptyLedStudioFrame()];
+  const events = [];
+  let previous = {};
+
+  frames.forEach((frame) => {
+    const next = frame.cells || {};
+    Object.keys(previous).forEach((key) => {
+      if (key in next) return;
+      const [x, y] = key.split(":").map(Number);
+      events.push({ type: "off", x, y });
+    });
+
+    Object.entries(next).forEach(([key, color]) => {
+      if (previous[key] === color) return;
+      const [x, y] = key.split(":").map(Number);
+      events.push({
+        type: "on",
+        x: String(x),
+        y,
+        mode: "hex",
+        color: sanitizeHex(color),
+        velocity: null,
+      });
+    });
+
+    events.push({ type: "delay", ms: Math.max(1, parseIntSafe(frame.duration, 90)) });
+    previous = { ...next };
+  });
+
+  return {
+    loop: Math.max(1, parseIntSafe(studio.loop, 1)),
+    suffix: "",
+    presetName: "custom",
+    previewColor: normalizeColor(studio.selectedColor || inferAnimationColor({ events })),
+    presetSpeed: inferAnimationSpeed({ events }),
+    events,
+  };
+}
+
+function resolveLedEventColor(event) {
+  if (event.mode === "hex" && event.color) {
+    return `#${sanitizeHex(event.color)}`;
+  }
+  if (event.mode === "auto") {
+    return velocityToHexColor(event.velocity, "#8453FD");
+  }
+  return "#8453FD";
+}
+
+function getCurrentLedStudioFrame() {
+  const frames = state.ledStudioEditor.frames || [];
+  if (!frames.length) {
+    state.ledStudioEditor.frames = [createEmptyLedStudioFrame()];
+    state.ledStudioEditor.currentFrameIndex = 0;
+  }
+  return state.ledStudioEditor.frames[clampIndex(state.ledStudioEditor.currentFrameIndex, state.ledStudioEditor.frames.length)];
+}
+
+function createLedStudioHeader(pad, studio) {
+  const animationLabel =
+    studio.animationIndex < (pad.ledAnimations?.length || 0)
+      ? `Animacao ${studio.animationIndex + 1}`
+      : "Nova animacao";
+  return el(
+    "div",
+    { className: "led-studio-topbar" },
+    el(
+      "div",
+      { className: "led-studio-meta" },
+      el("span", { className: "pill", textContent: `Pad ${pad.chain}:${pad.x}:${pad.y}` }),
+      el("span", { className: "pill", textContent: animationLabel })
+    ),
+    el(
+      "div",
+      { className: "compact-actions led-studio-actions" },
+      createMiniButton(studio.isPlaying ? "Parar teste" : "Testar animacao", () => {
+        state.ledStudioEditor.isPlaying = !state.ledStudioEditor.isPlaying;
+        renderLedStudioPanel();
+      }),
+      createMiniButton("Nova animacao", () => {
+        startNewLedStudioAnimation(pad);
+      }),
+      createMiniButton("Aplicar no pad", async () => {
+        await applyLedStudioToPad(pad);
+      }),
+      createMiniButton("Salvar na biblioteca", () => {
+        saveAnimationToLibrary(buildAnimationFromLedStudio(state.ledStudioEditor), pad);
+      })
+    )
+  );
+}
+
+function createLedStudioControlGrid(_pad, studio) {
+  const frame = getCurrentLedStudioFrame();
+  const colorInput = el("input", {
+    type: "color",
+    value: normalizeColor(studio.selectedColor || "#8453FD"),
+  });
+  colorInput.addEventListener("input", () => {
+    state.ledStudioEditor.selectedColor = normalizeColor(colorInput.value);
+  });
+
+  const durationInput = el("input", {
+    type: "number",
+    min: "1",
+    max: "5000",
+    step: "1",
+    value: String(Math.max(1, parseIntSafe(frame.duration, 90))),
+  });
+  durationInput.addEventListener("input", () => {
+    frame.duration = Math.max(1, parseIntSafe(durationInput.value, frame.duration || 90));
+    if (state.ledStudioEditor.isPlaying) renderLedStudioPanel();
+  });
+
+  const loopInput = el("input", {
+    type: "number",
+    min: "1",
+    max: "99",
+    step: "1",
+    value: String(Math.max(1, parseIntSafe(studio.loop, 1))),
+  });
+  loopInput.addEventListener("input", () => {
+    state.ledStudioEditor.loop = Math.max(1, parseIntSafe(loopInput.value, 1));
+  });
+
+  return el(
+    "div",
+    { className: "row-grid cols-4 led-studio-control-grid" },
+    el(
+      "label",
+      { className: "field" },
+      el("span", { textContent: "Cor do frame" }),
+      colorInput,
+      el("span", { className: "field-helper", textContent: "A mesma cor vale para os pads que voce clicar." })
+    ),
+    el(
+      "label",
+      { className: "field" },
+      el("span", { textContent: "Duracao do frame (ms)" }),
+      durationInput,
+      el("span", { className: "field-helper", textContent: "Controla quanto tempo este quadro fica aceso." })
+    ),
+    el(
+      "label",
+      { className: "field" },
+      el("span", { textContent: "Loop da animacao" }),
+      loopInput,
+      el("span", { className: "field-helper", textContent: "Quantidade de repeticoes quando o arquivo tocar." })
+    ),
+    el(
+      "div",
+      { className: "field led-studio-inline-tools" },
+      el("span", { textContent: "Ferramentas" }),
+      el(
+        "div",
+        { className: "compact-actions led-studio-inline-actions" },
+        createMiniButton("Limpar frame", () => {
+          frame.cells = {};
+          renderLedStudioPanel();
+        }),
+        createMiniButton("Todos off", () => {
+          state.ledStudioEditor.frames = state.ledStudioEditor.frames.map((item) => ({ ...item, cells: {} }));
+          state.ledStudioEditor.isPlaying = false;
+          renderLedStudioPanel();
+        })
+      ),
+      el("span", {
+        className: "field-helper",
+        textContent: "Clique no mesmo pad duas vezes para apagar so aquele ponto.",
+      })
+    )
+  );
+}
+
+function bindLedStudioLaunchpad(launchpad) {
+  launchpad.querySelectorAll(".launchpad-cell").forEach((cell) => {
+    const coord = cell.getAttribute("data-pad");
+    cell.addEventListener("click", () => {
+      toggleLedStudioCell(coord);
+    });
+  });
+}
+
+function toggleLedStudioCell(coordKey) {
+  const frame = getCurrentLedStudioFrame();
+  const nextColor = normalizeColor(state.ledStudioEditor.selectedColor || "#8453FD");
+  if (frame.cells[coordKey] === nextColor) {
+    delete frame.cells[coordKey];
+  } else {
+    frame.cells[coordKey] = nextColor;
+  }
+  renderLedStudioPanel();
+}
+
+function paintLedStudioFrame(launchpad, frame) {
+  const active = new Map(Object.entries(frame?.cells || {}));
+  applyPreviewFrame(
+    new Map([...launchpad.querySelectorAll(".launchpad-cell")].map((cell) => [cell.getAttribute("data-pad"), cell])),
+    { active, duration: Math.max(1, parseIntSafe(frame?.duration, 90)) }
+  );
+}
+
+function createLedStudioFrameNavigator(studio) {
+  const currentLabel = `Frame ${studio.currentFrameIndex + 1} de ${studio.frames.length}`;
+  return el(
+    "div",
+    { className: "led-studio-frame-toolbar" },
+    el("span", { className: "pill", textContent: currentLabel }),
+    el(
+      "div",
+      { className: "compact-actions led-studio-frame-actions" },
+      createMiniButton("Anterior", () => {
+        state.ledStudioEditor.currentFrameIndex = Math.max(0, state.ledStudioEditor.currentFrameIndex - 1);
+        state.ledStudioEditor.isPlaying = false;
+        renderLedStudioPanel();
+      }),
+      createMiniButton("Proximo", () => {
+        state.ledStudioEditor.currentFrameIndex = Math.min(
+          state.ledStudioEditor.frames.length - 1,
+          state.ledStudioEditor.currentFrameIndex + 1
+        );
+        state.ledStudioEditor.isPlaying = false;
+        renderLedStudioPanel();
+      }),
+      createMiniButton("Adicionar frame", () => {
+        insertLedStudioFrameAfterCurrent(false);
+      }),
+      createMiniButton("Duplicar frame", () => {
+        insertLedStudioFrameAfterCurrent(true);
+      }),
+      createMiniButton("Remover frame", () => {
+        removeCurrentLedStudioFrame();
+      })
+    )
+  );
+}
+
+function createLedStudioFrameStrip(studio) {
+  const strip = el("div", { className: "led-studio-frame-strip" });
+  studio.frames.forEach((frame, index) => {
+    const litPads = Object.keys(frame.cells || {}).length;
+    const preview = createLaunchpadPreviewGrid("is-mini led-frame-mini-preview", 10);
+    paintLedStudioFrame(preview, frame);
+    const button = el(
+      "button",
+      {
+        type: "button",
+        className: `led-frame-card${index === studio.currentFrameIndex ? " is-active" : ""}`,
+        "data-frame-index": String(index),
+      },
+      preview,
+      el("strong", { textContent: `Frame ${index + 1}` }),
+      el("span", { textContent: `${Math.max(1, parseIntSafe(frame.duration, 90))} ms` }),
+      el("small", { textContent: `${litPads} pad(s) aceso(s)` })
+    );
+    button.addEventListener("click", () => {
+      state.ledStudioEditor.currentFrameIndex = index;
+      state.ledStudioEditor.isPlaying = false;
+      renderLedStudioPanel();
+    });
+    strip.append(button);
+  });
+  return el("div", { className: "led-studio-frame-carousel" }, strip);
+}
+
+function insertLedStudioFrameAfterCurrent(duplicateCurrent) {
+  const current = getCurrentLedStudioFrame();
+  const nextFrame = duplicateCurrent
+    ? {
+        id: createLibraryEntryId(),
+        duration: Math.max(1, parseIntSafe(current.duration, 90)),
+        cells: { ...(current.cells || {}) },
+      }
+    : createEmptyLedStudioFrame(current.duration);
+  state.ledStudioEditor.frames.splice(state.ledStudioEditor.currentFrameIndex + 1, 0, nextFrame);
+  state.ledStudioEditor.currentFrameIndex += 1;
+  state.ledStudioEditor.isPlaying = false;
+  renderLedStudioPanel();
+}
+
+function removeCurrentLedStudioFrame() {
+  if (state.ledStudioEditor.frames.length <= 1) {
+    state.ledStudioEditor.frames = [createEmptyLedStudioFrame()];
+    state.ledStudioEditor.currentFrameIndex = 0;
+  } else {
+    state.ledStudioEditor.frames.splice(state.ledStudioEditor.currentFrameIndex, 1);
+    state.ledStudioEditor.currentFrameIndex = clampIndex(
+      state.ledStudioEditor.currentFrameIndex,
+      state.ledStudioEditor.frames.length
+    );
+  }
+  state.ledStudioEditor.isPlaying = false;
+  renderLedStudioPanel();
+}
+
+function startNewLedStudioAnimation(pad) {
+  state.ledStudioEditor = {
+    padKey: pad.key,
+    animationIndex: pad.ledAnimations.length,
+    currentFrameIndex: 0,
+    frames: [createEmptyLedStudioFrame()],
+    selectedColor: "#8453FD",
+    loop: 1,
+    isPlaying: false,
+  };
+  renderLedStudioPanel();
+}
+
+async function applyLedStudioToPad(pad) {
+  const animation = buildAnimationFromLedStudio(state.ledStudioEditor);
+  const targetIndex = Math.max(0, state.ledStudioEditor.animationIndex);
+  if (targetIndex < pad.ledAnimations.length) {
+    pad.ledAnimations[targetIndex] = animation;
+  } else {
+    pad.ledAnimations.push(animation);
+  }
+  state.selectedLedIndex = targetIndex;
+  state.ledStudioEditor.animationIndex = targetIndex;
+  renderSelectedPadEditor();
+  renderGrid();
+  renderStats();
+  renderLedStudioPanel();
+  try {
+    await saveProject({ quiet: true, rethrow: true });
+    setStatus(`Animacao aplicada ao pad ${pad.chain}:${pad.x}:${pad.y}.`, "success");
+  } catch (error) {
+    setStatus(error.message || "Falha ao salvar a animacao de LED.", "error");
+  }
 }
 
 function createAudioImportPanel(pad) {
@@ -1411,6 +1864,18 @@ function createInitialAudioClipEditorState() {
     baseCanvasWidth: 760,
     canvasHeight: 240,
     dpr: Math.max(1, window.devicePixelRatio || 1),
+  };
+}
+
+function createInitialLedStudioEditorState() {
+  return {
+    padKey: "",
+    animationIndex: 0,
+    currentFrameIndex: 0,
+    frames: [createEmptyLedStudioFrame()],
+    selectedColor: "#8453FD",
+    loop: 1,
+    isPlaying: false,
   };
 }
 
@@ -2725,23 +3190,29 @@ function createLedPreview(animation, previewRatePercent = 100) {
 }
 
 function createEditorMediaTabPanel(pad, animation, previewRatePercent = 100) {
-  const isLibrary = state.editorMediaSubview === "library";
+  const isPreview = state.editorMediaSubview === "preview";
+  const isAudioLibrary = state.editorMediaSubview === "library";
+  const isAnimationLibrary = state.editorMediaSubview === "animation-library";
   const wrapper = el("div", { className: "editor-preview led-preview-pane stack editor-media-panel" });
   const tabs = el(
     "div",
     { className: "mini-tabs led-preview-tabs" },
-    createMiniTabButton("Preview", !isLibrary, () => {
+    createMiniTabButton("Preview", isPreview, () => {
       state.editorMediaSubview = "preview";
       renderLedEditor(pad);
     }),
-    createMiniTabButton("Biblioteca de audio", isLibrary, () => {
+    createMiniTabButton("Biblioteca de audio", isAudioLibrary, () => {
       state.editorMediaSubview = "library";
+      renderLedEditor(pad);
+    }),
+    createMiniTabButton("Biblioteca de animacao", isAnimationLibrary, () => {
+      state.editorMediaSubview = "animation-library";
       renderLedEditor(pad);
     })
   );
 
   wrapper.append(tabs);
-  if (isLibrary) {
+  if (isAudioLibrary) {
     wrapper.append(
       el(
         "div",
@@ -2749,6 +3220,21 @@ function createEditorMediaTabPanel(pad, animation, previewRatePercent = 100) {
         ...buildAudioLibraryWorkspaceNodes({
           title: "Biblioteca de audio",
           subtitle: "Escolha um corte e aplique no slot atual deste pad.",
+          pad,
+        })
+      )
+    );
+    return wrapper;
+  }
+
+  if (isAnimationLibrary) {
+    wrapper.append(
+      el(
+        "div",
+        { className: "editor-media-library stack" },
+        ...buildLedLibraryWorkspaceNodes({
+          title: "Biblioteca de animacoes",
+          subtitle: "Escolha uma animacao pronta para aplicar neste pad.",
           pad,
         })
       )
@@ -2819,6 +3305,24 @@ function createLedLibraryChooser(pad) {
 }
 
 function createLedLibraryWorkspace(pad) {
+  return el(
+    "div",
+    { className: "editor-focus stack" },
+    ...buildLedLibraryWorkspaceNodes({ pad })
+  );
+}
+
+function buildLedLibraryWorkspaceNodes(options = {}) {
+  const title = options.title || "Biblioteca de animacoes";
+  const subtitle = options.subtitle || "Animacoes prontas para reutilizar em outros pads e projetos.";
+  const pad = options.pad ?? getSelectedPad();
+  if (!state.project) {
+    return [
+      createFocusHeader(title, "Carregue um projeto para reutilizar animacoes."),
+      createEmptyState("Nenhum projeto carregado."),
+    ];
+  }
+
   const targetText = pad
     ? `Aplicando em Chain ${pad.chain} · Pad ${pad.x},${pad.y}.`
     : "Selecione um pad na aba Editor ou LED para aplicar uma animacao.";
@@ -2826,10 +3330,8 @@ function createLedLibraryWorkspace(pad) {
     ? state.ledLibrary.map((entry) => createLedLibraryCard(entry, pad))
     : [createEmptyState("Nenhuma animacao salva ainda. Salve uma animacao para reaproveitar aqui.")];
 
-  return el(
-    "div",
-    { className: "editor-focus stack" },
-    createFocusHeader("Biblioteca de animacoes", "Animacoes prontas para reutilizar em outros pads e projetos."),
+  return [
+    createFocusHeader(title, subtitle),
     el(
       "div",
       { className: "audio-library-meta" },
@@ -2837,7 +3339,7 @@ function createLedLibraryWorkspace(pad) {
       el("span", { className: "muted", textContent: targetText })
     ),
     el("div", { className: "led-library-grid" }, ...libraryItems)
-  );
+  ];
 }
 
 function createLedLibraryCard(entry, pad) {

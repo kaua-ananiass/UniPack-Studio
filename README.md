@@ -102,6 +102,19 @@ Depois abra:
 http://127.0.0.1:8765
 ```
 
+## Deploy no Render
+
+Existe uma base pronta para deploy em:
+
+- [RENDER_DEPLOY.md](/Users/user/Downloads/_The_Spectre/unipack_editor/RENDER_DEPLOY.md)
+- [render.yaml](/Users/user/Downloads/_The_Spectre/unipack_editor/render.yaml)
+
+Start command usado no Render:
+
+```bash
+python3 server.py --host 0.0.0.0 --port $PORT
+```
+
 ## O que o editor faz
 
 - Carrega a pasta do projeto real
