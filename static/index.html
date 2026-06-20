@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UniPack Editor</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div class="hero-brand">
+          <span class="brand-chip">UniPad Studio</span>
+          <div class="brand-block">
+            <h1>UniStudio</h1>
+            <p class="brand-subtitle">Editor visual para montar packs, cortes e animacoes.</p>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <label class="field grow">
+            <span>Pasta do projeto</span>
+            <div class="input-with-button">
+              <input id="project-path" type="text" />
+              <button id="pick-project-path" type="button" class="mini">Escolher</button>
+            </div>
+          </label>
+          <div class="button-row">
+            <button id="create-project">Criar projeto</button>
+            <button id="load-project" class="primary">Carregar projeto</button>
+            <button id="save-project">Salvar projeto</button>
+            <button id="export-project">Exportar .zip</button>
+          </div>
+          <p id="status" class="status">Pronto para carregar.</p>
+        </div>
+      </header>
+
+      <div class="sr-only" aria-hidden="true">
+        <span id="project-title-pill"></span>
+        <span id="sound-count-pill"></span>
+        <button id="toggle-project-panel" type="button">Mostrar projeto</button>
+        <button id="toggle-audio-library" type="button">Biblioteca</button>
+        <button id="add-sound-row" type="button">Novo slot</button>
+        <div id="sound-editor" class="stack"></div>
+      </div>
+
+      <section class="view-navbar panel">
+        <div class="view-navbar-row">
+          <button id="view-main-tab" class="view-tab is-active" type="button">Editor</button>
+          <button id="view-audio-tab" class="view-tab" type="button">Audio</button>
+          <button id="view-led-tab" class="view-tab" type="button">LED</button>
+          <button id="view-library-tab" class="view-tab" type="button">Biblioteca</button>
+        </div>
+      </section>
+
+      <section id="main-view-shell" class="main-view-shell">
+        <section id="project-panel" class="panel project-detail-panel" hidden>
+          <div class="project-panel-grid">
+            <section>
+              <div class="panel-title-row">
+                <h2>Projeto</h2>
+              </div>
+              <div id="stats" class="stats-grid compact-stats"></div>
+            </section>
+
+            <section>
+              <div class="panel-title-row">
+                <h2>Info</h2>
+                <button id="add-extra-info" class="mini">Nova chave</button>
+              </div>
+              <div id="info-fields" class="form-grid"></div>
+              <div id="extra-info" class="stack"></div>
+            </section>
+
+            <section>
+              <div class="panel-title-row">
+                <h2>Arquivos em Sounds/</h2>
+              </div>
+              <div id="sound-library" class="sound-library"></div>
+            </section>
+          </div>
+        </section>
+
+        <main id="main-workspace" class="workspace">
+          <section class="main-column">
+            <section class="panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Grade 8x8</h2>
+                  <p class="panel-subtitle">
+                    Clique em um pad para editar sons e LEDs daquele botão.
+                  </p>
+                </div>
+                <div class="grade-actions">
+                  <div id="selected-pad-badge" class="selected-pad-badge"></div>
+                  <button id="add-led-animation" class="mini">
+                    Adicionar animacao
+                  </button>
+                </div>
+              </div>
+              <div class="grid-led-layout">
+                <div class="grid-pane">
+                  <div class="grid-wrap compact-grid-wrap">
+                    <div id="pad-grid" class="pad-grid compact-pad-grid"></div>
+                  </div>
+                </div>
+
+                <div class="grid-led-pane">
+                  <div id="led-editor" class="stack"></div>
+                </div>
+              </div>
+            </section>
+          </section>
+        </main>
+      </section>
+
+      <section id="clip-editor-panel" class="panel clip-editor-panel top-view-panel" hidden>
+        <div class="panel-title-row">
+          <div>
+            <h2>Editor de Corte</h2>
+            <p class="panel-subtitle">
+              Importe um audio, marque o inicio e o fim e salve direto no pad escolhido.
+            </p>
+          </div>
+          <div class="button-row clip-panel-meta">
+            <span id="clip-pad-pill" class="pill">Sem pad</span>
+            <button id="clip-close-button" class="mini" type="button">Voltar ao principal</button>
+          </div>
+        </div>
+
+        <div class="mini-tabs clip-subview-navbar">
+          <button id="clip-view-preview-tab" class="mini-tab is-active" type="button">Preview</button>
+          <button id="clip-view-library-tab" class="mini-tab" type="button">Biblioteca de audio</button>
+        </div>
+
+        <div id="clip-editor-preview-view" class="clip-editor-layout">
+          <section class="editor-focus stack">
+            <div class="row-grid cols-2">
+              <label class="field">
+                <span>Arquivo local</span>
+                <input id="clip-file-input" type="file" accept="audio/*" />
+              </label>
+              <label class="field">
+                <span>Nome do corte</span>
+                <input id="clip-name" type="text" />
+              </label>
+            </div>
+
+            <div class="row-grid cols-2">
+              <label class="field">
+                <span>Inicio</span>
+                <input id="clip-start-input" type="number" step="0.001" min="0" />
+              </label>
+              <label class="field">
+                <span>Fim</span>
+                <input id="clip-end-input" type="number" step="0.001" min="0" />
+              </label>
+            </div>
+
+            <div class="row-grid cols-2">
+              <label class="field">
+                <span>Zoom</span>
+                <input id="clip-zoom-input" type="range" min="1" max="24" step="1" value="1" />
+              </label>
+              <label class="field">
+                <span>Esticar</span>
+                <input id="clip-stretch-input" type="range" min="1" max="4" step="0.25" value="1" />
+              </label>
+            </div>
+
+            <div class="inline-actions">
+              <button id="clip-preview-button" type="button">Ouvir selecao</button>
+              <button id="clip-save-button" type="button" class="primary">Criar corte</button>
+              <button id="clip-continue-button" type="button">Continuar do fim</button>
+              <button id="clip-full-button" type="button">Usar audio inteiro</button>
+              <button id="clip-zoom-fit-button" type="button">Zoom selecao</button>
+            </div>
+            <p id="clip-status" class="status">Escolha um audio para comecar.</p>
+          </section>
+
+          <section class="editor-focus stack">
+            <div class="clip-toolbar">
+              <span id="clip-selection-length" class="pill">0.00 s</span>
+              <span id="clip-zoom-value" class="pill">Zoom 1x</span>
+              <span id="clip-stretch-value" class="pill">Largura 1.00x</span>
+              <span id="clip-window-value" class="pill">Janela completa</span>
+              <span id="clip-playhead-value" class="pill">Parado</span>
+            </div>
+
+            <div class="navigation-row">
+              <button id="clip-pan-left-button" type="button">←</button>
+              <input id="clip-pan-slider" type="range" min="0" max="0" step="0.01" value="0" />
+              <button id="clip-pan-right-button" type="button">→</button>
+            </div>
+
+            <div id="clip-canvas-wrap" class="clip-canvas-wrap">
+              <canvas id="clip-canvas" width="1100" height="320"></canvas>
+              <div id="clip-selection-overlay" class="clip-selection-overlay" aria-hidden="true">
+                <div id="clip-selection-window" class="clip-selection-window"></div>
+                <div id="clip-start-handle" class="clip-drag-handle" aria-label="Mover inicio do corte"></div>
+                <div id="clip-end-handle" class="clip-drag-handle" aria-label="Mover fim do corte"></div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div id="clip-library-view" class="clip-library-view" hidden></div>
+      </section>
+
+      <section id="led-studio-panel" class="panel led-studio-panel top-view-panel" hidden>
+        <div class="panel-title-row">
+          <div>
+            <h2>Editor de LED</h2>
+            <p class="panel-subtitle">Crie e ajuste a animacao do pad selecionado.</p>
+          </div>
+        </div>
+        <div id="led-studio-content" class="stack"></div>
+      </section>
+
+      <section id="led-library-panel" class="panel led-library-panel top-view-panel" hidden>
+        <div class="panel-title-row">
+          <div>
+            <h2>Biblioteca de Animacoes</h2>
+            <p class="panel-subtitle">Visualize, salve e reaproveite animacoes em outros pads e projetos.</p>
+          </div>
+        </div>
+        <div id="led-library-content" class="stack"></div>
+      </section>
+    </div>
+
+    <datalist id="sound-options"></datalist>
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

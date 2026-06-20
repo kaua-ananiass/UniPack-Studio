@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Editor de Corte</title>
+    <link rel="stylesheet" href="./audio-editor.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Editor de Audio</p>
+          <h1>Corte por espectrograma</h1>
+          <p class="subtitle">
+            Importe um audio, marque inicio e fim com as barras e crie um corte
+            para o pad selecionado.
+          </p>
+        </div>
+        <div class="meta">
+          <span id="pad-pill" class="pill"></span>
+          <span id="project-pill" class="pill"></span>
+        </div>
+      </header>
+
+      <section class="panel controls">
+        <label class="field">
+          <span>Arquivo local</span>
+          <input id="file-input" type="file" accept="audio/*" />
+        </label>
+        <label class="field">
+          <span>Nome do corte</span>
+          <input id="clip-name" type="text" />
+        </label>
+        <div class="field-group">
+          <label class="field">
+            <span>Inicio</span>
+            <input id="start-input" type="number" step="0.001" min="0" />
+          </label>
+          <label class="field">
+            <span>Fim</span>
+            <input id="end-input" type="number" step="0.001" min="0" />
+          </label>
+        </div>
+        <div class="field-group">
+          <label class="field">
+            <span>Zoom</span>
+            <input id="zoom-input" type="range" min="1" max="24" step="1" value="1" />
+          </label>
+          <label class="field">
+            <span>Esticar</span>
+            <input id="stretch-input" type="range" min="1" max="4" step="0.25" value="1.5" />
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="preview-button" type="button">Ouvir selecao</button>
+          <button id="save-button" type="button" class="primary">Criar corte</button>
+          <button id="full-button" type="button">Usar audio inteiro</button>
+          <button id="zoom-fit-button" type="button">Zoom selecao</button>
+        </div>
+        <p id="status" class="status">Escolha um audio para comecar.</p>
+      </section>
+
+      <section class="panel spectrogram-panel">
+        <div class="spectrogram-head">
+          <div>
+            <h2>Faixas do Audio</h2>
+            <p class="subtitle small">
+              Visual simples do audio para facilitar o corte. Arraste na area
+              para marcar o trecho.
+            </p>
+          </div>
+          <div class="selection-meta">
+            <strong id="selection-length">0.00 s</strong>
+            <span>duracao selecionada</span>
+          </div>
+        </div>
+        <div class="spectrogram-toolbar">
+          <span id="zoom-value" class="pill">Zoom 1x</span>
+          <span id="stretch-value" class="pill">Largura 1.5x</span>
+          <span id="window-value" class="pill">Janela completa</span>
+          <span id="playhead-value" class="pill">Parado</span>
+        </div>
+        <div class="navigation-row">
+          <button id="pan-left-button" type="button">←</button>
+          <input id="pan-slider" type="range" min="0" max="0" step="0.01" value="0" />
+          <button id="pan-right-button" type="button">→</button>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="spectrogram" width="1100" height="360"></canvas>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./audio-editor.js"></script>
+  </body>
+</html>
