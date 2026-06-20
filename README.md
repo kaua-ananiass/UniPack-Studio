@@ -1,4 +1,4 @@
-# UniPack Editor
+# Unipack Studio
 
 Editor local para projetos do UniPad, feito em cima da estrutura real deste pack.
 

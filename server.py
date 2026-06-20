@@ -479,7 +479,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), UniPackEditorHandler)
-    print(f"UniPack Editor rodando em http://{args.host}:{args.port}")
+    print(f"Unipack Studio rodando em http://{args.host}:{args.port}")
     print(f"Pasta padrao do projeto: {DEFAULT_PROJECT_PATH}")
     try:
         server.serve_forever()
