@@ -8,10 +8,12 @@ import {
 let supabaseClient = null;
 
 export function hasSupabaseConfig() {
-  return Boolean(
-    String(SUPABASE_URL || "").trim() &&
-    String(SUPABASE_PUBLISHABLE_KEY || "").trim()
-  );
+  const url = String(SUPABASE_URL || "").trim();
+  const key = String(SUPABASE_PUBLISHABLE_KEY || "").trim();
+  if (!url || !key) return false;
+  if (url.includes("SEU-PROJETO")) return false;
+  if (key.includes("SUA_PUBLISHABLE_KEY")) return false;
+  return true;
 }
 
 export function getSupabaseClient() {

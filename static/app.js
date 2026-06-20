@@ -1,3 +1,12 @@
+import {
+  deletePublishedAnimation,
+  fetchPublicAnimations,
+  getSupabaseClient,
+  hasSupabaseConfig,
+  publishAnimation,
+  signInAnonymouslyIfNeeded,
+} from "./supabase-service.js";
+
 const LED_LIBRARY_KEY = "unipack-led-library-v1";
 const AUDIO_LIBRARY_KEY = "unipack-audio-library-v1";
 const LAST_PROJECT_PATH_KEY = "unipack-last-project-path-v1";
@@ -14,7 +23,15 @@ const state = {
   selectedLedIndex: 0,
   previewSpeedOverrides: {},
   ledPreviewTimers: [],
-  ledLibrary: loadLedLibrary(),
+  localLedLibrary: loadLedLibrary(),
+  remoteLedLibrary: [],
+  ledLibrary: [],
+  ledLibrarySyncing: false,
+  ledLibrarySyncError: "",
+  supabaseUserId: "",
+  ledLibraryPanelSubview: "local",
+  ledCommunitySort: "rating_desc",
+  editorAnimationLibraryPage: 0,
   ledLibraryPickerOpen: false,
   audioLibrary: [],
   audioLibraryPickerOpen: false,
@@ -30,6 +47,7 @@ const state = {
 };
 
 state.audio.preload = "auto";
+syncLedLibraryState();
 
 const LED_PRESETS = [
   ["custom", "Atual do arquivo"],
@@ -352,11 +370,12 @@ function initializeApp() {
   const savedPath = loadRememberedProjectPath();
   refs.projectPath.value = savedPath;
   renderAll();
+  void initializeSupabaseLedLibrary();
   if (savedPath) {
     void loadProject(savedPath, { fromRemembered: true });
     return;
   }
-  setStatus("Escolha uma pasta de projeto para carregar.", "");
+  setStatus("Escolha uma pasta para carregar um projeto ou criar um pack em branco.", "");
 }
 
 async function loadProject(path = refs.projectPath.value.trim(), options = {}) {
@@ -402,7 +421,15 @@ async function loadProject(path = refs.projectPath.value.trim(), options = {}) {
 }
 
 async function createProject() {
-  const chosenPath = refs.projectPath.value.trim();
+  let chosenPath = refs.projectPath.value.trim();
+  if (!chosenPath) {
+    const picked = await chooseFolderInto(refs.projectPath);
+    if (!picked) {
+      setStatus("Escolha uma pasta para criar o projeto em branco.", "error");
+      return;
+    }
+    chosenPath = refs.projectPath.value.trim();
+  }
   const inferredName = chosenPath.split(/[\\/]/).filter(Boolean).pop() || "Novo UniPack";
   const payload = {
     projectPath: chosenPath,
@@ -545,11 +572,13 @@ async function chooseFolderInto(input) {
       throw new Error(payload.error || "Nao foi possivel abrir o seletor de pasta.");
     }
     if (payload.cancelled || !payload.path) {
-      return;
+      return false;
     }
     input.value = payload.path;
+    return true;
   } catch (error) {
     setStatus(error.message || "Falha ao escolher a pasta.", "error");
+    return false;
   }
 }
 
@@ -833,7 +862,7 @@ function renderSelectedPadEditor() {
     refs.toggleAudioLibrary.disabled = true;
     refs.toggleAudioLibrary.textContent = "Biblioteca";
     refs.soundEditor.replaceChildren(createEmptyState("Carregue ou crie um projeto para editar os pads."));
-    refs.ledEditor.replaceChildren(createEmptyState("Carregue ou crie um projeto para editar os LEDs."));
+    refs.ledEditor.replaceChildren(createProjectStartPanel());
     renderAudioLibraryPanel();
     renderAudioClipEditorPanel();
     renderLedStudioPanel();
@@ -894,12 +923,6 @@ function createChainLaunchButton(chain, chainCount) {
     button.classList.add("is-disabled");
     button.disabled = true;
   } else {
-    if (summary.sounds > 0) button.classList.add("has-sound");
-    if (summary.leds > 0) button.classList.add("has-led");
-    if (summary.color) {
-      button.classList.add("has-preview-color");
-      applyLaunchButtonColor(button, summary.color);
-    }
     if (chain === state.currentChain) {
       button.classList.add("is-selected");
     }
@@ -907,12 +930,10 @@ function createChainLaunchButton(chain, chainCount) {
   }
 
   button.append(
-    el("strong", { textContent: `${chain}` }),
+    el("span", { className: "chain-play-icon", "aria-hidden": "true" }),
     el(
-      "div",
-      { className: "pad-meta chain-pad-meta" },
-      el("span", { textContent: isAvailable ? `chain` : "" }),
-      el("span", { textContent: isAvailable ? `${summary.leds || 0} led` : "" })
+      "span",
+      { className: "chain-index-badge", textContent: `${chain}` }
     )
   );
   return button;
@@ -1266,11 +1287,47 @@ function syncLedStudioActiveFramePosition() {
 function renderLedLibraryPanel() {
   if (!refs.ledLibraryContent) return;
   if (refs.ledLibraryPadPill) refs.ledLibraryPadPill.textContent = "";
+  const isCommunity = state.ledLibraryPanelSubview === "community";
+  const entries = getLedLibraryPanelEntries();
+  const cards = entries.length
+    ? entries.map((entry) => createLedLibraryCard(entry, null))
+    : [createEmptyState(getLedLibraryPanelEmptyMessage())];
+
   refs.ledLibraryContent.replaceChildren(
     el(
       "div",
       { className: "editor-focus stack" },
-      createEmptyState("A biblioteca de animacoes ainda esta em construcao.")
+      createFocusHeader(
+        "Biblioteca de animacoes",
+        isCommunity
+          ? "Animacoes publicadas pela comunidade para usar nos seus projetos."
+          : "Animacoes locais salvas no seu navegador para reaproveitar depois.",
+        isCommunity && hasSupabaseConfig()
+          ? [
+              createMiniButton(state.ledLibrarySyncing ? "Sincronizando..." : "Atualizar online", () => {
+                void refreshRemoteLedLibrary();
+              }),
+            ]
+          : []
+      ),
+      el(
+        "div",
+        { className: "mini-tabs led-library-navbar" },
+        createMiniTabButton("Animacoes locais", !isCommunity, () => {
+          state.ledLibraryPanelSubview = "local";
+          renderLedLibraryPanel();
+        }),
+        createMiniTabButton("Comunidade", isCommunity, () => {
+          state.ledLibraryPanelSubview = "community";
+          renderLedLibraryPanel();
+        })
+      ),
+      isCommunity ? createLedCommunityToolbar() : null,
+      createLedLibraryPanelMeta(isCommunity, entries.length),
+      state.ledLibrarySyncError && isCommunity
+        ? el("span", { className: "muted", textContent: `Biblioteca online: ${state.ledLibrarySyncError}` })
+        : null,
+      el("div", { className: "led-library-grid" }, ...cards)
     )
   );
 }
@@ -3207,6 +3264,7 @@ function createEditorMediaTabPanel(pad, animation, previewRatePercent = 100) {
     }),
     createMiniTabButton("Biblioteca de animacao", isAnimationLibrary, () => {
       state.editorMediaSubview = "animation-library";
+      state.editorAnimationLibraryPage = 0;
       renderLedEditor(pad);
     })
   );
@@ -3236,6 +3294,7 @@ function createEditorMediaTabPanel(pad, animation, previewRatePercent = 100) {
           title: "Biblioteca de animacoes",
           subtitle: "Escolha uma animacao pronta para aplicar neste pad.",
           pad,
+          compact: true,
         })
       )
     );
@@ -3277,7 +3336,7 @@ function createLedPreviewContent(animation, previewRatePercent = 100) {
 function createLedLibraryChooser(pad) {
   const libraryItems = state.ledLibrary.length
     ? state.ledLibrary.map((entry) => createLedLibraryCard(entry, pad))
-    : [createEmptyState("Nenhuma animacao salva ainda. Salve uma animacao pronta para reutilizar em outros projetos.")];
+    : [createEmptyState(getLedLibraryEmptyMessage())];
 
   return el(
     "div",
@@ -3316,6 +3375,7 @@ function buildLedLibraryWorkspaceNodes(options = {}) {
   const title = options.title || "Biblioteca de animacoes";
   const subtitle = options.subtitle || "Animacoes prontas para reutilizar em outros pads e projetos.";
   const pad = options.pad ?? getSelectedPad();
+  const compact = Boolean(options.compact);
   if (!state.project) {
     return [
       createFocusHeader(title, "Carregue um projeto para reutilizar animacoes."),
@@ -3326,28 +3386,66 @@ function buildLedLibraryWorkspaceNodes(options = {}) {
   const targetText = pad
     ? `Aplicando em Chain ${pad.chain} · Pad ${pad.x},${pad.y}.`
     : "Selecione um pad na aba Editor ou LED para aplicar uma animacao.";
-  const libraryItems = state.ledLibrary.length
-    ? state.ledLibrary.map((entry) => createLedLibraryCard(entry, pad))
-    : [createEmptyState("Nenhuma animacao salva ainda. Salve uma animacao para reaproveitar aqui.")];
+  const allEntries = state.ledLibrary;
+  const compactPageSize = 4;
+  const maxPage = compact ? Math.max(0, Math.ceil(allEntries.length / compactPageSize) - 1) : 0;
+  if (compact) {
+    state.editorAnimationLibraryPage = Math.min(state.editorAnimationLibraryPage, maxPage);
+  }
+  const compactStart = compact ? state.editorAnimationLibraryPage * compactPageSize : 0;
+  const visibleEntries = compact ? allEntries.slice(compactStart, compactStart + compactPageSize) : allEntries;
+  const libraryItems = visibleEntries.length
+    ? visibleEntries.map((entry) => createLedLibraryCard(entry, pad, { compact }))
+    : [createEmptyState(getLedLibraryEmptyMessage())];
+  const headerActions = compact
+    ? createCompactLedLibraryHeaderActions(maxPage, pad, compactPageSize)
+    : createLedLibraryHeaderActions();
+
+  if (compact) {
+    return [
+      el(
+        "div",
+        { className: "compact-library-topbar" },
+        el(
+          "div",
+          { className: "compact-library-title" },
+          el("strong", { textContent: "Animacoes" }),
+          el("span", { className: "muted", textContent: `${state.ledLibrary.length} opcoes para este pad` })
+        ),
+        el("div", { className: "inline-actions compact-library-actions" }, ...headerActions)
+      ),
+      state.ledLibrarySyncError
+        ? el("span", { className: "muted compact-library-status", textContent: "Biblioteca online indisponivel no momento." })
+        : null,
+      el("div", { className: "led-library-grid is-compact" }, ...libraryItems)
+    ];
+  }
 
   return [
-    createFocusHeader(title, subtitle),
+    createFocusHeader(title, subtitle, headerActions),
     el(
       "div",
-      { className: "audio-library-meta" },
+      { className: `audio-library-meta${compact ? " is-compact" : ""}` },
       el("span", { className: "pill", textContent: `${state.ledLibrary.length} animacao(oes)` }),
+      el("span", { className: "pill", textContent: `${state.localLedLibrary.length} local(is)` }),
+      el("span", { className: "pill", textContent: `${state.remoteLedLibrary.length} online` }),
       el("span", { className: "muted", textContent: targetText })
     ),
-    el("div", { className: "led-library-grid" }, ...libraryItems)
+    state.ledLibrarySyncError
+      ? el("span", { className: "muted", textContent: `Biblioteca online: ${state.ledLibrarySyncError}` })
+      : null,
+    el("div", { className: `led-library-grid${compact ? " is-compact" : ""}` }, ...libraryItems)
   ];
 }
 
-function createLedLibraryCard(entry, pad) {
+function createLedLibraryCard(entry, pad, options = {}) {
+  const compact = Boolean(options.compact);
   const animation = buildAnimationFromLibraryEntry(entry);
+  const isRemoteOwner = entry.source === "remote" && entry.authorId && entry.authorId === state.supabaseUserId;
   ensureLedAnimationUi(animation, pad || createVirtualPadForPreview());
   const previewColor = normalizeColor(entry.previewColor || animation.previewColor || inferAnimationColor(animation));
   const previewRatePercent = getPreviewRatePercent(`library:${entry.id}`, entry.previewRatePercent);
-  const preview = createLaunchpadPreviewGrid("is-mini", 22);
+  const preview = createLaunchpadPreviewGrid("is-mini", compact ? 16 : 22);
   startLedPreview(preview, animation, previewColor, {
     loop: true,
     group: "library",
@@ -3356,30 +3454,40 @@ function createLedLibraryCard(entry, pad) {
 
   return el(
     "div",
-    { className: "library-card stack" },
+    { className: `library-card stack${compact ? " is-compact" : ""}` },
     el(
       "div",
       { className: "library-card-head" },
       el("strong", { textContent: entry.name || "Animacao sem nome" }),
-      el("span", { className: "pill", textContent: labelForPreset(entry.presetName || "custom") })
+      el(
+        "div",
+        { className: "mini-tabs library-card-pills" },
+        el("span", { className: "pill", textContent: labelForPreset(entry.presetName || "custom") }),
+        el("span", { className: `pill${entry.source === "remote" ? " pill-remote" : ""}`, textContent: entry.source === "remote" ? "Online" : "Local" })
+      )
     ),
     el("span", {
       className: "muted",
-      textContent: `${formatLibraryOrigin(entry)} · velocidade ${entry.presetSpeed || inferAnimationSpeed(animation)} ms · preview ${previewRatePercent}%`,
+      textContent: compact ? buildCompactLedLibraryMetaText(entry, animation) : buildLedLibraryMetaText(entry, animation, previewRatePercent),
     }),
-    createPreviewRateField(`library:${entry.id}`, previewRatePercent, {
-      label: "Preview",
-      helper: "100% original, maior fica mais lento",
-      onApply: (value) => {
-        entry.previewRatePercent = value;
-        persistLedLibrary();
-        if (pad) {
-          renderLedEditor(pad);
-        } else {
-          renderLedLibraryPanel();
-        }
-      },
-    }),
+    compact
+      ? null
+      : createPreviewRateField(`library:${entry.id}`, previewRatePercent, {
+          label: "Preview",
+          helper: "100% original, maior fica mais lento",
+          onApply: (value) => {
+            entry.previewRatePercent = value;
+            if (entry.source !== "remote") {
+              updateLocalLibraryEntry(entry);
+              persistLedLibrary();
+            }
+            if (pad) {
+              renderLedEditor(pad);
+            } else {
+              renderLedLibraryPanel();
+            }
+          },
+        }),
     preview,
     el(
       "div",
@@ -3392,14 +3500,23 @@ function createLedLibraryCard(entry, pad) {
             state.currentView = "editor";
             renderViewNavigation();
           }),
-      createMiniButton("Apagar", () => {
-        deleteAnimationFromLibrary(entry.id);
-        if (pad) {
-          renderLedEditor(pad);
-        } else {
-          renderLedLibraryPanel();
-        }
-      })
+      entry.source === "remote"
+        ? createMiniButton("Salvar local", () => {
+            saveRemoteAnimationToLocalLibrary(entry);
+            if (pad) {
+              renderLedEditor(pad);
+            } else {
+              renderLedLibraryPanel();
+            }
+          })
+        : createMiniButton("Publicar online", async () => {
+            await publishLibraryAnimationEntry(entry, pad);
+          }),
+      entry.source === "remote" && !isRemoteOwner
+        ? null
+        : createMiniButton(entry.source === "remote" ? "Apagar online" : "Apagar", async () => {
+            await deleteAnimationFromLibrary(entry, pad);
+          })
     )
   );
 }
@@ -3808,6 +3925,34 @@ function createEmptyState(message) {
   return el("div", { className: "empty-state", textContent: message });
 }
 
+function createProjectStartPanel() {
+  return el(
+    "div",
+    { className: "editor-focus stack" },
+    createFocusHeader("Comece do zero", "Crie um projeto em branco e monte tudo do seu jeito."),
+    el("span", {
+      className: "muted",
+      textContent: "Basta escolher a pasta onde o pack sera salvo. O editor cria a estrutura base automaticamente.",
+    }),
+    el(
+      "div",
+      { className: "compact-actions" },
+      createMiniButton("Escolher pasta", async () => {
+        await chooseFolderInto(refs.projectPath);
+      }),
+      createMiniButton("Criar projeto em branco", async () => {
+        await createProject();
+      }),
+      createMiniButton("Carregar projeto existente", async () => {
+        const picked = await chooseFolderInto(refs.projectPath);
+        if (picked) {
+          await loadProject();
+        }
+      })
+    )
+  );
+}
+
 function buildAudioLibraryWorkspaceNodes(options = {}) {
   const title = options.title || "Biblioteca de audio";
   const subtitle = options.subtitle || "Cortes salvos para reaproveitar em qualquer pad.";
@@ -4016,7 +4161,7 @@ function loadLedLibrary() {
 
 function persistLedLibrary() {
   try {
-    window.localStorage.setItem(LED_LIBRARY_KEY, JSON.stringify(state.ledLibrary));
+    window.localStorage.setItem(LED_LIBRARY_KEY, JSON.stringify(state.localLedLibrary));
   } catch (error) {
     setStatus("Nao foi possivel salvar a biblioteca local de animacoes.", "error");
   }
@@ -4035,6 +4180,13 @@ function normalizeLedLibraryEntry(entry) {
     originX: parseIntSafe(entry.originX, 1) || 1,
     originY: parseIntSafe(entry.originY, 1) || 1,
     previewRatePercent: clampPreviewRatePercent(parseIntSafe(entry.previewRatePercent, 100)),
+    source: entry.source === "remote" ? "remote" : "local",
+    authorId: String(entry.authorId || ""),
+    authorName: String(entry.authorName || ""),
+    createdAt: String(entry.createdAt || ""),
+    ratingAvg: Number(entry.ratingAvg ?? entry.rating ?? 0) || 0,
+    downloadCount: parseIntSafe(entry.downloadCount ?? entry.downloads ?? 0, 0) || 0,
+    isPublished: Boolean(entry.isPublished || entry.source === "remote"),
     events: Array.isArray(entry.events) ? structuredClone(entry.events) : [],
   };
 }
@@ -4055,19 +4207,33 @@ function saveAnimationToLibrary(animation, pad) {
     originX: pad.x,
     originY: pad.y,
     previewRatePercent: 100,
+    source: "local",
     events: animation.events || [],
   });
 
-  state.ledLibrary.unshift(entry);
+  state.localLedLibrary.unshift(entry);
+  syncLedLibraryState();
   persistLedLibrary();
-  setStatus(`Animacao "${entry.name}" salva na biblioteca.`, "success");
+  setStatus(`Animacao "${entry.name}" salva na biblioteca local.`, "success");
   renderLedEditor(pad);
 }
 
-function deleteAnimationFromLibrary(entryId) {
-  state.ledLibrary = state.ledLibrary.filter((entry) => entry.id !== entryId);
-  persistLedLibrary();
-  setStatus("Animacao removida da biblioteca.", "success");
+async function deleteAnimationFromLibrary(entry, pad = null) {
+  try {
+    if (entry.source === "remote") {
+      await deletePublishedAnimation(entry.id);
+      await refreshRemoteLedLibrary({ quiet: true });
+      setStatus("Animacao online removida da biblioteca.", "success");
+    } else {
+      state.localLedLibrary = state.localLedLibrary.filter((item) => item.id !== entry.id);
+      syncLedLibraryState();
+      persistLedLibrary();
+      setStatus("Animacao removida da biblioteca local.", "success");
+    }
+    rerenderLedLibrarySurfaces(pad);
+  } catch (error) {
+    setStatus(error.message || "Falha ao remover a animacao da biblioteca.", "error");
+  }
 }
 
 function createLibraryEntryId() {
@@ -4082,18 +4248,310 @@ function buildLibraryAnimationName(animation, pad) {
 }
 
 async function applyLibraryAnimationToPad(entry, pad) {
-  pad.ledAnimations.push(buildAnimationFromLibraryEntry(entry));
-  state.selectedLedIndex = pad.ledAnimations.length - 1;
+  const nextAnimation = buildAnimationFromLibraryEntry(entry);
+  if (pad.ledAnimations.length) {
+    const message = [
+      `O pad ${pad.chain}:${pad.x}:${pad.y} ja possui ${pad.ledAnimations.length} animacao(oes).`,
+      `Deseja substituir pela animacao "${entry.name || "selecionada"}"?`,
+    ].join("\n");
+    const confirmed = window.confirm(message);
+    if (!confirmed) {
+      setStatus("Substituicao cancelada.", "");
+      return;
+    }
+    pad.ledAnimations = [nextAnimation];
+    state.selectedLedIndex = 0;
+  } else {
+    pad.ledAnimations = [nextAnimation];
+    state.selectedLedIndex = 0;
+  }
   state.ledLibraryPickerOpen = false;
   renderSelectedPadEditor();
   renderGrid();
   renderStats();
   try {
     await saveProject({ quiet: true, rethrow: true });
-    setStatus(`Animacao "${entry.name || "selecionada"}" adicionada ao pad e salva no projeto.`, "success");
+    setStatus(`Animacao "${entry.name || "selecionada"}" aplicada ao pad e salva no projeto.`, "success");
   } catch (error) {
     setStatus(error.message || "Falha ao salvar a animacao no projeto.", "error");
   }
+}
+
+async function initializeSupabaseLedLibrary() {
+  if (!hasSupabaseConfig()) {
+    state.ledLibrarySyncError = "Supabase nao configurado.";
+    syncLedLibraryState();
+    renderLedLibraryPanel();
+    return;
+  }
+  state.ledLibrarySyncError = "";
+  state.ledLibrarySyncing = true;
+  try {
+    await signInAnonymouslyIfNeeded();
+    await hydrateSupabaseUser();
+    await refreshRemoteLedLibrary({ quiet: true });
+  } catch (error) {
+    state.ledLibrarySyncError = error.message || "Falha ao carregar a biblioteca online.";
+    renderLedLibraryPanel();
+  } finally {
+    state.ledLibrarySyncing = false;
+  }
+}
+
+async function hydrateSupabaseUser() {
+  try {
+    const supabase = getSupabaseClient();
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser();
+    if (error) throw error;
+    state.supabaseUserId = String(user?.id || "");
+  } catch (error) {
+    state.supabaseUserId = "";
+    throw error;
+  }
+}
+
+async function refreshRemoteLedLibrary(options = {}) {
+  if (!hasSupabaseConfig()) return [];
+  const rows = await fetchPublicAnimations();
+  state.remoteLedLibrary = rows.map(mapRemoteLedLibraryEntry).filter(Boolean);
+  state.ledLibrarySyncError = "";
+  syncLedLibraryState();
+  rerenderLedLibrarySurfaces();
+  if (!options.quiet) {
+    setStatus("Biblioteca online atualizada.", "success");
+  }
+  return state.remoteLedLibrary;
+}
+
+function mapRemoteLedLibraryEntry(row) {
+  return normalizeLedLibraryEntry({
+    id: row.id,
+    name: row.name,
+    presetName: row.preset_name,
+    previewColor: row.preview_color,
+    presetSpeed: row.preset_speed,
+    loop: row.loop,
+    suffix: row.suffix,
+    originX: row.origin_x,
+    originY: row.origin_y,
+    previewRatePercent: row.preview_rate_percent,
+    authorId: row.author_id,
+    authorName: row.author_name,
+    createdAt: row.created_at,
+    ratingAvg: row.rating_avg ?? row.rating ?? 0,
+    downloadCount: row.download_count ?? row.downloads ?? 0,
+    isPublished: row.is_public,
+    source: "remote",
+    events: row.events,
+  });
+}
+
+function syncLedLibraryState() {
+  state.ledLibrary = [...state.localLedLibrary, ...state.remoteLedLibrary];
+}
+
+function rerenderLedLibrarySurfaces(pad = null) {
+  const selectedPad = pad || getSelectedPad();
+  if (selectedPad) {
+    renderLedEditor(selectedPad);
+  } else {
+    renderLedLibraryPanel();
+  }
+  renderLedLibraryPanel();
+}
+
+function updateLocalLibraryEntry(entry) {
+  const index = state.localLedLibrary.findIndex((item) => item.id === entry.id);
+  if (index === -1) return;
+  state.localLedLibrary[index] = normalizeLedLibraryEntry(entry);
+  syncLedLibraryState();
+}
+
+function saveRemoteAnimationToLocalLibrary(entry) {
+  const cloned = normalizeLedLibraryEntry({
+    ...entry,
+    id: createLibraryEntryId(),
+    source: "local",
+    isPublished: false,
+  });
+  state.localLedLibrary = [cloned, ...state.localLedLibrary.filter((item) => item.name !== cloned.name || item.id !== cloned.id)];
+  syncLedLibraryState();
+  persistLedLibrary();
+  setStatus(`Animacao "${cloned.name}" salva localmente.`, "success");
+}
+
+async function publishLibraryAnimationEntry(entry, pad) {
+  if (!hasSupabaseConfig()) {
+    setStatus("Preencha o Supabase para publicar animacoes online.", "error");
+    return;
+  }
+  try {
+    setStatus(`Publicando "${entry.name}" na biblioteca online...`);
+    await publishAnimation(entry);
+    await hydrateSupabaseUser();
+    await refreshRemoteLedLibrary({ quiet: true });
+    setStatus(`Animacao "${entry.name}" publicada online.`, "success");
+    rerenderLedLibrarySurfaces(pad);
+  } catch (error) {
+    setStatus(error.message || "Falha ao publicar a animacao online.", "error");
+  }
+}
+
+function createLedLibraryHeaderActions() {
+  if (!hasSupabaseConfig()) return [];
+  return [
+    createMiniButton(state.ledLibrarySyncing ? "Sincronizando..." : "Atualizar online", () => {
+      void refreshRemoteLedLibrary();
+    }),
+  ];
+}
+
+function createCompactLedLibraryHeaderActions(maxPage, pad) {
+  const actions = [];
+  const totalPages = Math.max(1, maxPage + 1);
+  const currentPage = Math.min(totalPages, state.editorAnimationLibraryPage + 1);
+  if (hasSupabaseConfig() && state.remoteLedLibrary.length) {
+    actions.push(createMiniButton("Atualizar", () => {
+      void refreshRemoteLedLibrary({ quiet: false });
+    }));
+  }
+  actions.push(el("span", { className: "pill pill-compact", textContent: `${currentPage}/${totalPages}` }));
+  actions.push(
+    createMiniButton("←", () => {
+      state.editorAnimationLibraryPage = Math.max(0, state.editorAnimationLibraryPage - 1);
+      if (pad) {
+        renderLedEditor(pad);
+      } else {
+        renderLedLibraryPanel();
+      }
+    }),
+    createMiniButton("→", () => {
+      state.editorAnimationLibraryPage = Math.min(maxPage, state.editorAnimationLibraryPage + 1);
+      if (pad) {
+        renderLedEditor(pad);
+      } else {
+        renderLedLibraryPanel();
+      }
+    })
+  );
+  return actions;
+}
+
+function getLedLibraryEmptyMessage() {
+  if (state.ledLibrarySyncing) {
+    return "Carregando biblioteca online...";
+  }
+  if (hasSupabaseConfig()) {
+    return "Nenhuma animacao encontrada. Salve algo localmente ou publique novas animacoes online.";
+  }
+  return "Nenhuma animacao salva ainda. Salve uma animacao para reaproveitar aqui.";
+}
+
+function buildLedLibraryMetaText(entry, animation, previewRatePercent) {
+  const parts = [
+    formatLibraryOrigin(entry),
+    `velocidade ${entry.presetSpeed || inferAnimationSpeed(animation)} ms`,
+    `preview ${previewRatePercent}%`,
+  ];
+  if (entry.source === "remote" && entry.authorName) {
+    parts.push(`por ${entry.authorName}`);
+  }
+  if (entry.source === "remote") {
+    parts.push(`${formatRatingValue(entry.ratingAvg)} nota`);
+    parts.push(`${entry.downloadCount || 0} downloads`);
+  }
+  return parts.join(" · ");
+}
+
+function buildCompactLedLibraryMetaText(entry, animation) {
+  const parts = [
+    entry.source === "remote" ? "Online" : "Local",
+    `${entry.presetSpeed || inferAnimationSpeed(animation)} ms`,
+  ];
+  if (entry.source === "remote" && entry.authorName) {
+    parts.push(entry.authorName);
+  }
+  return parts.join(" · ");
+}
+
+function getLedLibraryPanelEntries() {
+  if (state.ledLibraryPanelSubview === "community") {
+    return sortCommunityLedLibraryEntries(state.remoteLedLibrary);
+  }
+  return [...state.localLedLibrary];
+}
+
+function getLedLibraryPanelEmptyMessage() {
+  if (state.ledLibraryPanelSubview === "community") {
+    if (state.ledLibrarySyncing) {
+      return "Carregando animacoes da comunidade...";
+    }
+    if (!hasSupabaseConfig()) {
+      return "Configure o Supabase para ver as animacoes da comunidade.";
+    }
+    return "Nenhuma animacao da comunidade encontrada ainda.";
+  }
+  return "Nenhuma animacao local salva ainda.";
+}
+
+function createLedCommunityToolbar() {
+  const sortField = createSelectField(
+    "Ordenar por",
+    state.ledCommunitySort,
+    [
+      ["rating_desc", "Melhor avaliadas"],
+      ["downloads_desc", "Mais baixadas"],
+      ["rating_asc", "Pior avaliadas"],
+      ["downloads_asc", "Menos baixadas"],
+      ["newest", "Mais recentes"],
+    ],
+    (value) => {
+      state.ledCommunitySort = value;
+      renderLedLibraryPanel();
+    }
+  );
+  return el("div", { className: "led-library-toolbar" }, sortField);
+}
+
+function createLedLibraryPanelMeta(isCommunity, visibleCount) {
+  return el(
+    "div",
+    { className: "audio-library-meta" },
+    el("span", { className: "pill", textContent: isCommunity ? `${state.remoteLedLibrary.length} online` : `${state.localLedLibrary.length} local(is)` }),
+    el("span", { className: "pill", textContent: `${visibleCount} exibida(s)` }),
+    el(
+      "span",
+      { className: "muted", textContent: isCommunity ? "Escolha uma animacao da comunidade para aplicar ou salvar localmente." : "Suas animacoes locais ficam guardadas aqui para reutilizar." }
+    )
+  );
+}
+
+function sortCommunityLedLibraryEntries(entries) {
+  const sorted = [...entries];
+  sorted.sort((left, right) => {
+    switch (state.ledCommunitySort) {
+      case "downloads_desc":
+        return (right.downloadCount || 0) - (left.downloadCount || 0);
+      case "downloads_asc":
+        return (left.downloadCount || 0) - (right.downloadCount || 0);
+      case "rating_asc":
+        return (left.ratingAvg || 0) - (right.ratingAvg || 0);
+      case "newest":
+        return String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
+      case "rating_desc":
+      default:
+        return (right.ratingAvg || 0) - (left.ratingAvg || 0);
+    }
+  });
+  return sorted;
+}
+
+function formatRatingValue(value) {
+  const numeric = Number(value) || 0;
+  return numeric.toFixed(1);
 }
 
 function loadRememberedProjectPath() {
