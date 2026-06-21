@@ -36,6 +36,9 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/runtime-config":
+            self._handle_runtime_config()
+            return
         if parsed.path == "/api/project":
             self._handle_get_project(parsed)
             return
@@ -81,6 +84,16 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
             self._send_json(project)
         except Exception as exc:  # noqa: BLE001
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _handle_runtime_config(self) -> None:
+        config = {
+            "supabaseUrl": os.environ.get("SUPABASE_URL", "").strip(),
+            "supabasePublishableKey": os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip(),
+            "supabaseLibraryTable": os.environ.get("SUPABASE_LIBRARY_TABLE", "led_library").strip() or "led_library",
+            "supabaseProjectAudioBucket": os.environ.get("SUPABASE_PROJECT_AUDIO_BUCKET", "project-audio").strip()
+            or "project-audio",
+        }
+        self._send_json(config)
 
     def _handle_pick_folder(self, parsed) -> None:
         params = parse_qs(parsed.query)
