@@ -17,7 +17,7 @@
           </div>
         </div>
         <div class="hero-actions">
-          <section class="auth-shell panel">
+          <section id="auth-shell" class="auth-shell panel">
             <div id="auth-tabs" class="mini-tabs auth-tabs">
               <button id="auth-signin-tab" class="mini-tab is-active" type="button">Entrar</button>
               <button id="auth-signup-tab" class="mini-tab" type="button">Criar conta</button>
@@ -57,10 +57,12 @@
             </label>
             <div class="button-row">
               <button id="create-project">Criar projeto</button>
+              <button id="import-project-zip" type="button">Abrir .zip</button>
               <button id="load-project" class="primary">Carregar projeto</button>
               <button id="save-project">Salvar projeto</button>
               <button id="export-project">Exportar .zip</button>
             </div>
+            <input id="project-zip-input" type="file" accept=".zip,application/zip" hidden />
             <p id="status" class="status">Pronto para carregar.</p>
           </section>
         </div>
@@ -71,6 +73,13 @@
           <div>
             <h2 id="cloud-project-title">Meus projetos</h2>
             <p id="cloud-project-subtitle" class="panel-subtitle">Crie, abra e salve seus projetos online na sua conta.</p>
+          </div>
+          <div id="dashboard-session" class="dashboard-session" hidden>
+            <div class="dashboard-session-meta">
+              <strong id="dashboard-user-name">Usuario</strong>
+              <span id="dashboard-user-email">Sem sessao</span>
+            </div>
+            <button id="dashboard-signout" type="button" class="mini">Sair</button>
           </div>
         </div>
         <div class="cloud-project-toolbar">

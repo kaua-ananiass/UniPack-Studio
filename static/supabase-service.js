@@ -109,9 +109,9 @@ export async function fetchPublicAnimations() {
   return data || [];
 }
 
-export async function publishAnimation(entry, userMeta = {}) {
+export async function publishAnimation(entry) {
   const supabase = getSupabaseClient();
-  const user = await requireAuthenticatedUser();
+  await requireAuthenticatedUser();
 
   const payload = {
     name: entry.name,
@@ -124,8 +124,6 @@ export async function publishAnimation(entry, userMeta = {}) {
     origin_y: Number(entry.originY || 1),
     preview_rate_percent: Number(entry.previewRatePercent || 100),
     events: Array.isArray(entry.events) ? entry.events : [],
-    author_id: user.id,
-    author_name: String(userMeta.authorName || user.user_metadata?.name || "Usuario"),
     is_public: true,
   };
 

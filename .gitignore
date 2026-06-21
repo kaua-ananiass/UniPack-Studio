@@ -1,0 +1,10 @@
+static/supabase-config.js
+.env
+.env.*
+!.env.example
+
+.imported_projects/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

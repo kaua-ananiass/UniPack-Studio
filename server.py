@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import mimetypes
 import os
@@ -9,9 +10,10 @@ import shutil
 import subprocess
 import tempfile
 import wave
+import zipfile
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, unquote, urlparse
 
 from unipack_format import create_empty_project, export_project_zip, parse_project, save_project
@@ -55,6 +57,12 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/project/create":
             self._handle_create_project()
+            return
+        if parsed.path == "/api/project/import-zip":
+            self._handle_import_project_zip()
+            return
+        if parsed.path == "/api/sound/clip":
+            self._handle_clip_sound()
             return
         if parsed.path == "/api/sound/import":
             self._handle_import_sound()
@@ -172,6 +180,29 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
+    def _handle_import_project_zip(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw_body = self.rfile.read(length)
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+            file_name = str(payload.get("fileName") or "").strip()
+            zip_base64 = str(payload.get("zipBase64") or "").strip()
+            if not file_name.lower().endswith(".zip"):
+                raise ValueError("Selecione um arquivo .zip valido")
+            if not zip_base64:
+                raise ValueError("Arquivo .zip nao informado")
+
+            imported_project_path = self._import_project_zip_bytes(base64.b64decode(zip_base64), file_name)
+            project = parse_project(imported_project_path)
+            self._send_json(
+                {
+                    "projectPath": str(imported_project_path),
+                    "project": project,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
     def _handle_get_sound(self, parsed) -> None:
         params = parse_qs(parsed.query)
         project_path = Path(params.get("path", [DEFAULT_PROJECT_PATH])[0]).expanduser().resolve()
@@ -272,6 +303,37 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
+    def _handle_clip_sound(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw_body = self.rfile.read(length)
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+            source_audio_base64 = str(payload.get("sourceAudioBase64") or "").strip()
+            source_file_name = str(payload.get("sourceFileName") or "").strip()
+            source_mime_type = str(payload.get("sourceMimeType") or "").strip()
+            selection_start = float(payload.get("selectionStart") or 0)
+            selection_end = float(payload.get("selectionEnd") or 0)
+
+            if not source_audio_base64:
+                raise ValueError("Audio de origem nao informado")
+
+            clip_bytes = self._build_clip_bytes_from_source(
+                base64.b64decode(source_audio_base64),
+                source_file_name,
+                source_mime_type,
+                selection_start,
+                selection_end,
+            )
+            self._send_json(
+                {
+                    "audioBase64": base64.b64encode(clip_bytes).decode("ascii"),
+                    "size": len(clip_bytes),
+                    "mimeType": "audio/wav",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
     def _send_json(self, payload, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -286,6 +348,12 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
         cleaned = "_".join(part for part in cleaned.split() if part)
         cleaned = cleaned.strip("._ ")
         return f"{cleaned or 'UniPack'}.zip"
+
+    @staticmethod
+    def _sanitize_folder_name(value: str) -> str:
+        cleaned = "".join(char if char.isalnum() or char in {" ", "_", "-"} else "_" for char in str(value or "").strip())
+        cleaned = "_".join(part for part in cleaned.split() if part)
+        return cleaned.strip("._ ") or "UniPack_Importado"
 
     @staticmethod
     def _pick_export_zip_path(initial_dir: Path, default_name: str) -> Path | None:
@@ -313,6 +381,77 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
         if not selected:
             return None
         return Path(selected).expanduser().resolve()
+
+    def _import_project_zip_bytes(self, zip_bytes: bytes, file_name: str) -> Path:
+        if not zip_bytes:
+            raise ValueError("O arquivo .zip enviado esta vazio")
+
+        import_root = BASE_DIR / ".imported_projects"
+        import_root.mkdir(parents=True, exist_ok=True)
+        folder_prefix = f"{self._sanitize_folder_name(Path(file_name).stem)}_"
+        extracted_root = Path(tempfile.mkdtemp(prefix=folder_prefix, dir=str(import_root)))
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+                self._safe_extract_zip(archive, extracted_root)
+        except zipfile.BadZipFile as exc:
+            shutil.rmtree(extracted_root, ignore_errors=True)
+            raise ValueError("O arquivo enviado nao e um .zip valido") from exc
+        except Exception:
+            shutil.rmtree(extracted_root, ignore_errors=True)
+            raise
+
+        project_root = self._detect_imported_project_root(extracted_root)
+        if project_root is None:
+            shutil.rmtree(extracted_root, ignore_errors=True)
+            raise ValueError("Nao encontrei a estrutura de um projeto UniPad dentro desse .zip")
+        return project_root
+
+    def _safe_extract_zip(self, archive: zipfile.ZipFile, destination: Path) -> None:
+        destination_resolved = destination.resolve()
+        for member in archive.infolist():
+            normalized_name = member.filename.replace("\\", "/").strip()
+            if not normalized_name:
+                continue
+
+            member_path = PurePosixPath(normalized_name)
+            safe_parts = [part for part in member_path.parts if part not in ("", ".", "..")]
+            if not safe_parts:
+                continue
+
+            target_path = (destination / Path(*safe_parts)).resolve()
+            try:
+                target_path.relative_to(destination_resolved)
+            except ValueError as exc:
+                raise ValueError("O .zip contem caminhos invalidos") from exc
+
+            if member.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                continue
+
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member, "r") as source_file, target_path.open("wb") as output_file:
+                shutil.copyfileobj(source_file, output_file)
+
+    def _detect_imported_project_root(self, extracted_root: Path) -> Path | None:
+        candidates: list[tuple[int, int, Path]] = []
+        directories = [extracted_root, *(path for path in extracted_root.rglob("*") if path.is_dir())]
+        for directory in directories:
+            marker_count = self._count_project_markers(directory)
+            if marker_count <= 0:
+                continue
+            depth = len(directory.relative_to(extracted_root).parts)
+            candidates.append((marker_count, -depth, directory))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        return candidates[0][2]
+
+    def _count_project_markers(self, root: Path) -> int:
+        markers = ("Info", "keySound", "keyLED", "Sounds", "autoPlay")
+        return sum(1 for marker in markers if self._detect_case_insensitive_path(root, marker) is not None)
 
     def _build_clip_bytes_from_source(
         self,

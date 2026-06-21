@@ -25,6 +25,7 @@ const AUDIO_CLIP_DRAFT_DB_NAME = "unipack-audio-clip-drafts-v1";
 const AUDIO_CLIP_DRAFT_STORE_NAME = "drafts";
 const MIN_AUDIBLE_SAMPLE = 0.0025;
 const MIN_CLIP_DURATION_SECONDS = 0.001;
+const MIN_PREVIEW_FRAME_MS = 20;
 
 const state = {
   project: null,
@@ -34,6 +35,7 @@ const state = {
   selectedLedIndex: 0,
   previewSpeedOverrides: {},
   ledPreviewTimers: [],
+  ledPreviewFrameHandle: 0,
   localLedLibrary: loadLedLibrary(),
   remoteLedLibrary: [],
   ledLibrary: [],
@@ -48,9 +50,12 @@ const state = {
   ledLibraryPanelSubview: "local",
   ledCommunitySort: "rating_desc",
   editorAnimationLibraryPage: 0,
+  ledLibraryPanelPage: 0,
   ledLibraryPickerOpen: false,
   audioLibrary: [],
   audioLibraryPickerOpen: false,
+  soundPreviewTokens: {},
+  soundSignedUrlCache: {},
   projectPanelOpen: false,
   currentView: "editor",
   audioClipSubview: "preview",
@@ -98,13 +103,17 @@ const LAUNCHPAD_ARGB = [
 const refs = {
   appShell: document.querySelector("#app-shell"),
   projectPath: document.querySelector("#project-path"),
+  projectPathField: document.querySelector("#project-path")?.closest(".field"),
   pickProjectPath: document.querySelector("#pick-project-path"),
   createProject: document.querySelector("#create-project"),
+  importProjectZip: document.querySelector("#import-project-zip"),
   loadProject: document.querySelector("#load-project"),
   saveProject: document.querySelector("#save-project"),
   exportProject: document.querySelector("#export-project"),
+  projectZipInput: document.querySelector("#project-zip-input"),
   status: document.querySelector("#status"),
   projectToolbarShell: document.querySelector("#project-toolbar-shell"),
+  authShell: document.querySelector("#auth-shell"),
   authTabs: document.querySelector("#auth-tabs"),
   authSigninTab: document.querySelector("#auth-signin-tab"),
   authSignupTab: document.querySelector("#auth-signup-tab"),
@@ -121,6 +130,10 @@ const refs = {
   cloudProjectShell: document.querySelector("#cloud-project-shell"),
   cloudProjectTitle: document.querySelector("#cloud-project-title"),
   cloudProjectSubtitle: document.querySelector("#cloud-project-subtitle"),
+  dashboardSession: document.querySelector("#dashboard-session"),
+  dashboardUserName: document.querySelector("#dashboard-user-name"),
+  dashboardUserEmail: document.querySelector("#dashboard-user-email"),
+  dashboardSignout: document.querySelector("#dashboard-signout"),
   cloudProjectName: document.querySelector("#cloud-project-name"),
   cloudProjectCreate: document.querySelector("#cloud-project-create"),
   cloudProjectSave: document.querySelector("#cloud-project-save"),
@@ -216,9 +229,21 @@ refs.createProject.addEventListener("click", () => createProject());
 refs.pickProjectPath.addEventListener("click", async () => {
   await chooseFolderInto(refs.projectPath);
 });
+refs.importProjectZip?.addEventListener("click", () => {
+  if (refs.projectZipInput) {
+    refs.projectZipInput.value = "";
+    refs.projectZipInput.click();
+  }
+});
 refs.loadProject.addEventListener("click", () => loadProject());
 refs.saveProject.addEventListener("click", () => saveProject());
 refs.exportProject.addEventListener("click", () => exportProjectZip());
+refs.projectZipInput?.addEventListener("change", async () => {
+  const [file] = refs.projectZipInput.files || [];
+  if (!file) return;
+  await importProjectZipFile(file);
+  refs.projectZipInput.value = "";
+});
 refs.authSigninTab?.addEventListener("click", () => {
   state.authMode = "signin";
   renderAuthPanel();
@@ -236,6 +261,9 @@ refs.authPassword?.addEventListener("keydown", (event) => {
   }
 });
 refs.authSignout?.addEventListener("click", () => {
+  void handleAuthSignOut();
+});
+refs.dashboardSignout?.addEventListener("click", () => {
   void handleAuthSignOut();
 });
 refs.cloudProjectCreate?.addEventListener("click", () => {
@@ -437,20 +465,21 @@ initializeApp();
 
 function initializeApp() {
   const savedPath = loadRememberedProjectPath();
-  refs.projectPath.value = savedPath;
+  refs.projectPath.value = savedPath.startsWith("cloud:") ? "" : savedPath;
   renderAll();
   void initializeAuth();
   void initializeSupabaseLedLibrary();
   if (savedPath) {
-    if (savedPath.startsWith("cloud:")) {
-      refs.projectPath.value = "";
-      setStatus("Entrando na conta para reabrir seu projeto online...", "");
-      return;
-    }
-    void loadProject(savedPath, { fromRemembered: true });
-    return;
+    setStatus("Entre na sua conta para abrir ou criar um projeto.", "");
+  } else {
+    setStatus("Entre na sua conta para comecar.", "");
   }
-  setStatus("Escolha uma pasta para carregar um projeto ou criar um pack em branco.", "");
+}
+
+function isHostedWebMode() {
+  const host = String(window.location.hostname || "").trim().toLowerCase();
+  if (!host) return false;
+  return !["127.0.0.1", "localhost"].includes(host) && !host.endsWith(".local");
 }
 
 async function loadProject(path = refs.projectPath.value.trim(), options = {}) {
@@ -490,19 +519,10 @@ async function loadProject(path = refs.projectPath.value.trim(), options = {}) {
     if (!response.ok) {
       throw new Error(project.error || "Falha ao carregar o projeto.");
     }
-
-    state.project = normalizeProject(project);
-    syncAudioLibraryFromProject(state.project);
-    state.audioLibraryPickerOpen = false;
-    refs.toggleAudioLibrary.textContent = "Biblioteca";
-    resetAudioClipEditor();
-    refs.projectPath.value = state.project.projectPath;
-    rememberProjectPath(state.project.projectPath);
-    state.currentChain = clampChain(state.currentChain, getChainCount());
-    pickInitialPad();
-    resetSelectedEditors();
-    renderAll();
-    await clearAudioClipDraftRecord(state.project.projectPath);
+    await applyLocalProjectSnapshot(project, {
+      chain: state.currentChain,
+      clearClipDraft: true,
+    });
     setStatus("Projeto carregado com sucesso.", "success");
     return true;
   } catch (error) {
@@ -555,21 +575,47 @@ async function createProject() {
     if (!response.ok) {
       throw new Error(project.error || "Falha ao criar o projeto.");
     }
-
-    state.project = normalizeProject(project);
-    syncAudioLibraryFromProject(state.project);
-    state.audioLibraryPickerOpen = false;
-    refs.toggleAudioLibrary.textContent = "Biblioteca";
-    resetAudioClipEditor();
-    refs.projectPath.value = state.project.projectPath;
-    rememberProjectPath(state.project.projectPath);
-    state.currentChain = 1;
-    pickInitialPad();
-    resetSelectedEditors();
-    renderAll();
+    await applyLocalProjectSnapshot(project, {
+      chain: 1,
+      clearClipDraft: false,
+    });
     setStatus("Projeto criado com sucesso.", "success");
   } catch (error) {
     setStatus(error.message || "Falha ao criar o projeto.", "error");
+  }
+}
+
+async function importProjectZipFile(file) {
+  if (!(file instanceof File)) {
+    setStatus("Selecione um arquivo .zip valido.", "error");
+    return false;
+  }
+
+  setStatus(`Importando ${file.name}...`);
+  try {
+    const zipBase64 = arrayBufferToBase64(await file.arrayBuffer());
+    const response = await fetch("/api/project/import-zip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fileName: file.name,
+        zipBase64,
+      }),
+    });
+    const payload = await readJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(payload.error || "Falha ao importar o projeto .zip.");
+    }
+
+    await applyLocalProjectSnapshot(payload.project, {
+      chain: 1,
+      clearClipDraft: true,
+    });
+    setStatus(`Projeto "${file.name}" importado com sucesso.`, "success");
+    return true;
+  } catch (error) {
+    setStatus(error.message || "Falha ao importar o projeto .zip.", "error");
+    return false;
   }
 }
 
@@ -687,6 +733,26 @@ async function chooseFolderInto(input) {
   }
 }
 
+async function applyLocalProjectSnapshot(project, options = {}) {
+  const normalizedProject = normalizeProject(project);
+  state.project = normalizedProject;
+  syncAudioLibraryFromProject(state.project);
+  state.audioLibraryPickerOpen = false;
+  state.ledLibraryPickerOpen = false;
+  refs.toggleAudioLibrary.textContent = "Biblioteca";
+  resetAudioClipEditor();
+  refs.projectPath.value = state.project.projectPath;
+  rememberProjectPath(state.project.projectPath);
+  const desiredChain = Number.isFinite(options.chain) ? Number(options.chain) : state.currentChain;
+  state.currentChain = clampChain(desiredChain || 1, getChainCount());
+  pickInitialPad();
+  resetSelectedEditors();
+  renderAll();
+  if (options.clearClipDraft) {
+    await clearAudioClipDraftRecord(state.project.projectPath);
+  }
+}
+
 async function readJsonResponse(response) {
   const rawText = await response.text();
   try {
@@ -698,6 +764,17 @@ async function readJsonResponse(response) {
     }
     throw new Error(rawText.trim() || "Resposta invalida do servidor.");
   }
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }
 
 function normalizeProject(project) {
@@ -759,9 +836,34 @@ function renderSessionLayout() {
   refs.appShell?.classList.toggle("is-dashboard-mode", hasUser && !hasProject);
   refs.appShell?.classList.toggle("is-editor-session", hasUser && hasProject);
 
+  if (refs.authShell) {
+    refs.authShell.hidden = hasUser;
+    refs.authShell.style.display = hasUser ? "none" : "";
+  }
+
   if (refs.projectToolbarShell) {
-    refs.projectToolbarShell.hidden = !hasProject;
-    refs.projectToolbarShell.style.display = hasProject ? "grid" : "none";
+    refs.projectToolbarShell.hidden = !hasUser;
+    refs.projectToolbarShell.style.display = hasUser ? "grid" : "none";
+  }
+  if (refs.projectPathField) {
+    refs.projectPathField.hidden = true;
+    refs.projectPathField.style.display = "none";
+  }
+  if (refs.createProject) {
+    refs.createProject.hidden = true;
+    refs.createProject.style.display = "none";
+  }
+  if (refs.loadProject) {
+    refs.loadProject.hidden = true;
+    refs.loadProject.style.display = "none";
+  }
+  if (refs.saveProject) {
+    refs.saveProject.hidden = true;
+    refs.saveProject.style.display = "none";
+  }
+  if (refs.exportProject) {
+    refs.exportProject.hidden = true;
+    refs.exportProject.style.display = "none";
   }
   if (refs.viewNavbar) {
     refs.viewNavbar.hidden = !hasProject;
@@ -820,7 +922,6 @@ function renderHeaderBits() {
     refs.saveProject.disabled = true;
     refs.exportProject.disabled = true;
     refs.toggleProjectPanel.disabled = true;
-    refs.projectPath.value = "";
     if (refs.cloudProjectName) {
       refs.cloudProjectName.value = "";
     }
@@ -982,6 +1083,7 @@ function renderGrid() {
       button.addEventListener("click", () => {
         state.selectedPadKey = key;
         resetSelectedEditors();
+        syncAudioEditorToSelectedPad();
         renderGrid();
         renderSelectedPadEditor();
         previewSelectedPadMedia();
@@ -1060,6 +1162,7 @@ function selectChain(chain) {
     state.selectedPadKey = padKey(targetChain, 1, getButtonY());
   }
   resetSelectedEditors();
+  syncAudioEditorToSelectedPad();
   renderHeaderBits();
   renderChainTabs();
   renderGrid();
@@ -1254,11 +1357,8 @@ function createAudioLibraryCard(entry, pad) {
       { className: "compact-actions" },
       createMiniButton("Ouvir", () => previewSound(entry.soundFile)),
       applyButton,
-      createMiniButton("Apagar", () => {
-        deleteSoundFromLibrary(entry.id);
-        if (pad) {
-          renderSoundEditor(pad);
-        }
+      createMiniButton("Apagar", async () => {
+        await deleteSoundFromLibrary(entry, pad);
       })
     )
   );
@@ -1438,13 +1538,10 @@ function syncLedStudioActiveFramePosition() {
 
 function renderLedLibraryPanel() {
   if (!refs.ledLibraryContent) return;
+  stopLedPreview("library");
   if (refs.ledLibraryPadPill) refs.ledLibraryPadPill.textContent = "";
   const isCommunity = state.ledLibraryPanelSubview === "community";
   const entries = getLedLibraryPanelEntries();
-  const cards = entries.length
-    ? entries.map((entry) => createLedLibraryCard(entry, null))
-    : [createEmptyState(getLedLibraryPanelEmptyMessage())];
-
   refs.ledLibraryContent.replaceChildren(
     el(
       "div",
@@ -1467,10 +1564,12 @@ function renderLedLibraryPanel() {
         { className: "mini-tabs led-library-navbar" },
         createMiniTabButton("Animacoes locais", !isCommunity, () => {
           state.ledLibraryPanelSubview = "local";
+          state.ledLibraryPanelPage = 0;
           renderLedLibraryPanel();
         }),
         createMiniTabButton("Comunidade", isCommunity, () => {
           state.ledLibraryPanelSubview = "community";
+          state.ledLibraryPanelPage = 0;
           renderLedLibraryPanel();
         })
       ),
@@ -1479,7 +1578,16 @@ function renderLedLibraryPanel() {
       state.ledLibrarySyncError && isCommunity
         ? el("span", { className: "muted", textContent: `Biblioteca online: ${state.ledLibrarySyncError}` })
         : null,
-      el("div", { className: "led-library-grid" }, ...cards)
+      ...buildLedLibraryWorkspaceNodes({
+        compact: true,
+        surface: "panel",
+        entries: getLedLibraryPanelEntries(),
+        emptyMessage: getLedLibraryPanelEmptyMessage(),
+        title: "Biblioteca de animacoes",
+        subtitle: isCommunity
+          ? "Animacoes publicadas pela comunidade para usar nos seus projetos."
+          : "Animacoes locais salvas no seu navegador para reaproveitar depois.",
+      })
     )
   );
 }
@@ -1924,17 +2032,25 @@ async function previewSound(soundFile) {
   }
 
   try {
-    const soundUrl = await resolveSoundPlaybackUrl(soundFile);
     stopAudioClipPreviewSource();
-    state.audio.pause();
-    state.audio.currentTime = 0;
-    if (state.audioObjectUrl) {
-      URL.revokeObjectURL(state.audioObjectUrl);
-      state.audioObjectUrl = "";
+    const currentKey = state.audio.dataset.soundFile || "";
+    const nextKey = String(soundFile);
+    const forceReload = currentKey !== nextKey || !state.audio.src;
+    if (forceReload) {
+      const soundUrl = await resolveSoundPlaybackUrl(soundFile);
+      state.audio.pause();
+      state.audio.currentTime = 0;
+      if (state.audioObjectUrl) {
+        URL.revokeObjectURL(state.audioObjectUrl);
+        state.audioObjectUrl = "";
+      }
+      state.audio.src = soundUrl;
+      state.audio.dataset.soundFile = nextKey;
+      state.audio.load();
+    } else {
+      state.audio.pause();
+      state.audio.currentTime = 0;
     }
-
-    state.audio.src = soundUrl;
-    state.audio.load();
     await state.audio.play();
     setStatus(`Tocando "${soundFile}".`, "success");
   } catch (error) {
@@ -1944,16 +2060,25 @@ async function previewSound(soundFile) {
 
 async function resolveSoundPlaybackUrl(soundFile) {
   if (!isCloudProject()) {
-    return `/api/sound?path=${encodeURIComponent(state.project.projectPath)}&file=${encodeURIComponent(soundFile)}&v=${Date.now()}`;
+    const cacheToken = state.soundPreviewTokens[soundFile] || 0;
+    return `/api/sound?path=${encodeURIComponent(state.project.projectPath)}&file=${encodeURIComponent(soundFile)}&v=${cacheToken}`;
   }
   const soundEntry = findProjectSoundEntry(soundFile);
   if (!soundEntry?.storagePath) {
     throw new Error("Este audio online ainda nao possui arquivo salvo no projeto.");
   }
+  const cached = state.soundSignedUrlCache[soundEntry.storagePath];
+  if (cached && cached.expiresAt > Date.now() + 10_000) {
+    return cached.url;
+  }
   const signedUrl = await createProjectAudioSignedUrl(soundEntry.storagePath, 3600);
   if (!signedUrl) {
     throw new Error("Nao foi possivel abrir o audio salvo no projeto online.");
   }
+  state.soundSignedUrlCache[soundEntry.storagePath] = {
+    url: signedUrl,
+    expiresAt: Date.now() + 55 * 60 * 1000,
+  };
   return signedUrl;
 }
 
@@ -2031,6 +2156,20 @@ function openAudioEditor(pad) {
   renderAudioClipEditorCanvas();
   scheduleAudioClipDraftPersist();
   refs.clipEditorPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function syncAudioEditorToSelectedPad() {
+  if (!state.audioClipEditor.open && state.currentView !== "audio") {
+    return;
+  }
+  if (!state.project) {
+    return;
+  }
+  ensureAudioClipEditorTargetFromSelection();
+  renderAudioClipEditorPanel();
+  if (state.currentView === "audio") {
+    renderAudioClipEditorCanvas();
+  }
 }
 
 function ensureAudioClipEditorTargetFromSelection() {
@@ -2633,8 +2772,7 @@ async function saveAudioClipSelectionOnline(fileName) {
     throw new Error("Salve ou crie o projeto online antes de adicionar cortes.");
   }
   const relativePath = buildUniqueProjectSoundPath(fileName);
-  const clip = buildAudioClipBuffer();
-  const bytes = encodeAudioBufferToWavBytes(clip);
+  const bytes = await buildAudioClipExportBytes();
   const previousProject = structuredClone(state.project);
   const previousAudioLibrary = structuredClone(state.audioLibrary);
   let uploaded = null;
@@ -2667,6 +2805,30 @@ async function saveAudioClipSelectionOnline(fileName) {
     }
     throw error;
   }
+}
+
+async function buildAudioClipExportBytes() {
+  if (state.audioClipEditor.sourceBlob) {
+    const response = await fetch("/api/sound/clip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sourceAudioBase64: await blobToBase64(state.audioClipEditor.sourceBlob),
+        sourceFileName: state.audioClipEditor.sourceName,
+        sourceMimeType: state.audioClipEditor.sourceMimeType,
+        selectionStart: state.audioClipEditor.selectionStart,
+        selectionEnd: state.audioClipEditor.selectionEnd,
+      }),
+    });
+    const payload = await readJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(payload.error || "Falha ao preparar o corte do audio.");
+    }
+    return base64ToBytes(payload.audioBase64 || "");
+  }
+
+  const clip = buildAudioClipBuffer();
+  return encodeAudioBufferToWavBytes(clip);
 }
 
 function continueAudioClipFromSelectionEnd() {
@@ -2707,6 +2869,16 @@ function applyImportedClipToProject(importedFile, targetPadKey, targetSoundIndex
   pad.sounds[slotIndex].soundFile = importedFile;
   state.selectedSoundIndex = slotIndex;
   state.project.stats = buildProjectStatsSnapshot();
+  state.soundPreviewTokens[importedFile] = Date.now();
+  if (soundEntry?.storagePath) {
+    delete state.soundSignedUrlCache[soundEntry.storagePath];
+  }
+  if (state.audio.dataset.soundFile === importedFile) {
+    state.audio.pause();
+    state.audio.removeAttribute("src");
+    state.audio.load();
+    state.audio.dataset.soundFile = "";
+  }
   saveSoundToLibrary(importedFile, {
     name: soundEntry?.name || fileStem(importedFile),
     bucket: soundEntry?.bucket,
@@ -3526,9 +3698,12 @@ function createEditorMediaTabPanel(pad, animation, previewRatePercent = 100) {
         { className: "editor-media-library stack" },
         ...buildLedLibraryWorkspaceNodes({
           title: "Biblioteca de animacoes",
-          subtitle: "Escolha uma animacao pronta para aplicar neste pad.",
+          subtitle: "Escolha uma animacao local pronta para aplicar neste pad.",
           pad,
           compact: true,
+          surface: "editor",
+          entries: [...state.localLedLibrary],
+          emptyMessage: "Nenhuma animacao local salva ainda. Use a aba Biblioteca para salvar modelos online localmente.",
         })
       )
     );
@@ -3541,6 +3716,15 @@ function createEditorMediaTabPanel(pad, animation, previewRatePercent = 100) {
   }
 
   wrapper.append(...createLedPreviewContent(animation, previewRatePercent));
+  wrapper.append(
+    el(
+      "div",
+      { className: "compact-actions editor-preview-actions" },
+      createMiniButton("Publicar na comunidade", async () => {
+        await publishCurrentEditorAnimation(animation, pad);
+      })
+    )
+  );
   return wrapper;
 }
 
@@ -3568,16 +3752,17 @@ function createLedPreviewContent(animation, previewRatePercent = 100) {
 }
 
 function createLedLibraryChooser(pad) {
-  const libraryItems = state.ledLibrary.length
-    ? state.ledLibrary.map((entry) => createLedLibraryCard(entry, pad))
-    : [createEmptyState(getLedLibraryEmptyMessage())];
+  const localEntries = [...state.localLedLibrary];
+  const libraryItems = localEntries.length
+    ? localEntries.map((entry) => createLedLibraryCard(entry, pad))
+    : [createEmptyState("Nenhuma animacao local salva ainda.")];
 
   return el(
     "div",
     { className: "editor-focus stack" },
     createFocusHeader(
       "Biblioteca de animacoes",
-      "Escolha uma animacao pronta para adicionar neste pad.",
+      "Escolha uma animacao local pronta para adicionar neste pad.",
       [
         createMiniButton("Criar do zero", () => {
           pad.ledAnimations.push(createPresetAnimation(pad, "pulse", "#55D6C2", 90));
@@ -3608,8 +3793,14 @@ function createLedLibraryWorkspace(pad) {
 function buildLedLibraryWorkspaceNodes(options = {}) {
   const title = options.title || "Biblioteca de animacoes";
   const subtitle = options.subtitle || "Animacoes prontas para reutilizar em outros pads e projetos.";
-  const pad = options.pad ?? getSelectedPad();
   const compact = Boolean(options.compact);
+  const requestedSurface = options.surface || "";
+  const surface = requestedSurface || (compact && options.pad ? "editor" : compact ? "panel" : "default");
+  const pad = options.pad ?? (surface === "editor" ? getSelectedPad() : null);
+  const compactInEditor = compact && surface === "editor";
+  const pageStateKey = surface === "editor" ? "editorAnimationLibraryPage" : "ledLibraryPanelPage";
+  const customEntries = Array.isArray(options.entries) ? options.entries : null;
+  const emptyMessage = options.emptyMessage || getLedLibraryEmptyMessage();
   if (!state.project) {
     return [
       createFocusHeader(title, "Carregue um projeto para reutilizar animacoes."),
@@ -3620,38 +3811,43 @@ function buildLedLibraryWorkspaceNodes(options = {}) {
   const targetText = pad
     ? `Aplicando em Chain ${pad.chain} · Pad ${pad.x},${pad.y}.`
     : "Selecione um pad na aba Editor ou LED para aplicar uma animacao.";
-  const allEntries = state.ledLibrary;
-  const compactPageSize = 4;
+  const allEntries = customEntries || getLedLibraryEntriesForSurface(surface);
+  const compactPageSize = compactInEditor ? 4 : surface === "panel" ? 6 : 6;
   const maxPage = compact ? Math.max(0, Math.ceil(allEntries.length / compactPageSize) - 1) : 0;
   if (compact) {
-    state.editorAnimationLibraryPage = Math.min(state.editorAnimationLibraryPage, maxPage);
+    state[pageStateKey] = Math.min(state[pageStateKey], maxPage);
   }
-  const compactStart = compact ? state.editorAnimationLibraryPage * compactPageSize : 0;
+  const compactStart = compact ? state[pageStateKey] * compactPageSize : 0;
   const visibleEntries = compact ? allEntries.slice(compactStart, compactStart + compactPageSize) : allEntries;
   const libraryItems = visibleEntries.length
-    ? visibleEntries.map((entry) => createLedLibraryCard(entry, pad, { compact }))
-    : [createEmptyState(getLedLibraryEmptyMessage())];
+    ? visibleEntries.map((entry) => createLedLibraryCard(entry, pad, { compact, surface }))
+    : [createEmptyState(emptyMessage)];
   const headerActions = compact
-    ? createCompactLedLibraryHeaderActions(maxPage, pad, compactPageSize)
+    ? createCompactLedLibraryHeaderActions(maxPage, pad, compactPageSize, surface)
     : createLedLibraryHeaderActions();
 
   if (compact) {
     return [
       el(
         "div",
-        { className: "compact-library-topbar" },
+        { className: `compact-library-topbar compact-library-topbar--${surface}${pad ? "" : " is-panel-mode"}` },
         el(
           "div",
           { className: "compact-library-title" },
-          el("strong", { textContent: "Animacoes" }),
-          el("span", { className: "muted", textContent: `${state.ledLibrary.length} opcoes para este pad` })
+          el("strong", { textContent: title }),
+          el("span", { className: "muted", textContent: `${allEntries.length} opcoes` })
         ),
         el("div", { className: "inline-actions compact-library-actions" }, ...headerActions)
       ),
       state.ledLibrarySyncError
         ? el("span", { className: "muted compact-library-status", textContent: "Biblioteca online indisponivel no momento." })
         : null,
-      el("div", { className: "led-library-grid is-compact" }, ...libraryItems)
+      !pad ? el("span", { className: "muted compact-library-status is-panel-mode", textContent: subtitle }) : null,
+      el(
+        "div",
+        { className: `led-library-grid is-compact${compactInEditor ? " is-editor-compact" : " is-panel-compact"}` },
+        ...libraryItems
+      )
     ];
   }
 
@@ -3660,9 +3856,9 @@ function buildLedLibraryWorkspaceNodes(options = {}) {
     el(
       "div",
       { className: `audio-library-meta${compact ? " is-compact" : ""}` },
-      el("span", { className: "pill", textContent: `${state.ledLibrary.length} animacao(oes)` }),
+      el("span", { className: "pill", textContent: `${allEntries.length} animacao(oes)` }),
       el("span", { className: "pill", textContent: `${state.localLedLibrary.length} local(is)` }),
-      el("span", { className: "pill", textContent: `${state.remoteLedLibrary.length} online` }),
+      surface === "editor" ? null : el("span", { className: "pill", textContent: `${state.remoteLedLibrary.length} online` }),
       el("span", { className: "muted", textContent: targetText })
     ),
     state.ledLibrarySyncError
@@ -4009,24 +4205,19 @@ function startLedPreview(container, animation, fallbackColor, options = {}) {
   const frames = buildPreviewFrames(animation, fallbackColor, speedMultiplier);
   if (!frames.length) return;
 
-  const controller = { timer: 0, cancelled: false, group };
-  state.ledPreviewTimers.push(controller);
-  let frameIndex = 0;
-  const runFrame = () => {
-    if (controller.cancelled) return;
-    applyPreviewFrame(cells, frames[frameIndex]);
-    const duration = frames[frameIndex].duration;
-    if (!loop && frameIndex >= frames.length - 1) {
-      controller.timer = window.setTimeout(() => {
-        controller.cancelled = true;
-      }, duration);
-      return;
-    }
-    frameIndex = (frameIndex + 1) % frames.length;
-    controller.timer = window.setTimeout(runFrame, duration);
+  const firstFrame = frames[0];
+  const controller = {
+    cancelled: false,
+    group,
+    loop,
+    cells,
+    frames,
+    frameIndex: 0,
+    nextFrameAt: performance.now() + firstFrame.duration,
   };
-
-  runFrame();
+  applyPreviewFrame(cells, firstFrame);
+  state.ledPreviewTimers.push(controller);
+  ensureLedPreviewLoop();
 }
 
 function stopLedPreview(group = "all") {
@@ -4035,11 +4226,12 @@ function stopLedPreview(group = "all") {
       return;
     }
     controller.cancelled = true;
-    if (controller.timer) {
-      window.clearTimeout(controller.timer);
-    }
   });
   state.ledPreviewTimers = state.ledPreviewTimers.filter((controller) => !controller.cancelled);
+  if (!state.ledPreviewTimers.length && state.ledPreviewFrameHandle) {
+    window.cancelAnimationFrame(state.ledPreviewFrameHandle);
+    state.ledPreviewFrameHandle = 0;
+  }
 }
 
 function buildPreviewFrames(animation, fallbackColor, speedMultiplier = 1) {
@@ -4057,7 +4249,7 @@ function buildPreviewFrames(animation, fallbackColor, speedMultiplier = 1) {
     } else if (event.type === "delay") {
       frames.push({
         active: new Map(active),
-        duration: Math.max(1, Math.round((Number(event.ms) || 90) * speedMultiplier)),
+        duration: Math.max(MIN_PREVIEW_FRAME_MS, Math.round((Number(event.ms) || 90) * speedMultiplier)),
       });
     }
   });
@@ -4067,6 +4259,58 @@ function buildPreviewFrames(animation, fallbackColor, speedMultiplier = 1) {
   }
 
   return frames;
+}
+
+function ensureLedPreviewLoop() {
+  if (state.ledPreviewFrameHandle) return;
+
+  const tick = (now) => {
+    let hasActiveControllers = false;
+
+    state.ledPreviewTimers.forEach((controller) => {
+      if (controller.cancelled) return;
+      hasActiveControllers = true;
+      advanceLedPreviewController(controller, now);
+    });
+
+    state.ledPreviewTimers = state.ledPreviewTimers.filter((controller) => !controller.cancelled);
+
+    if (state.ledPreviewTimers.length) {
+      state.ledPreviewFrameHandle = window.requestAnimationFrame(tick);
+      return;
+    }
+
+    state.ledPreviewFrameHandle = 0;
+    if (hasActiveControllers) return;
+  };
+
+  state.ledPreviewFrameHandle = window.requestAnimationFrame(tick);
+}
+
+function advanceLedPreviewController(controller, now) {
+  if (controller.cancelled || now < controller.nextFrameAt) {
+    return;
+  }
+
+  const maxAdvanceSteps = Math.max(1, controller.frames.length * 2);
+  let advancedSteps = 0;
+
+  while (!controller.cancelled && now >= controller.nextFrameAt && advancedSteps < maxAdvanceSteps) {
+    if (!controller.loop && controller.frameIndex >= controller.frames.length - 1) {
+      controller.cancelled = true;
+      return;
+    }
+
+    controller.frameIndex = (controller.frameIndex + 1) % controller.frames.length;
+    const nextFrame = controller.frames[controller.frameIndex];
+    applyPreviewFrame(controller.cells, nextFrame);
+    controller.nextFrameAt += nextFrame.duration;
+    advancedSteps += 1;
+  }
+
+  if (advancedSteps >= maxAdvanceSteps) {
+    controller.nextFrameAt = now + controller.frames[controller.frameIndex].duration;
+  }
 }
 
 function applyPreviewFrame(cells, frame) {
@@ -4161,16 +4405,10 @@ function createEmptyState(message) {
 
 function createProjectStartPanel() {
   const actions = [
-    createMiniButton("Escolher pasta", async () => {
-      await chooseFolderInto(refs.projectPath);
-    }),
-    createMiniButton("Criar projeto em branco", async () => {
-      await createProject();
-    }),
-    createMiniButton("Carregar projeto existente", async () => {
-      const picked = await chooseFolderInto(refs.projectPath);
-      if (picked) {
-        await loadProject();
+    createMiniButton("Importar .zip", () => {
+      if (refs.projectZipInput) {
+        refs.projectZipInput.value = "";
+        refs.projectZipInput.click();
       }
     }),
   ];
@@ -4186,10 +4424,10 @@ function createProjectStartPanel() {
   return el(
     "div",
     { className: "editor-focus stack" },
-    createFocusHeader("Comece do zero", "Crie um projeto em branco e monte tudo do seu jeito."),
+    createFocusHeader("Comece do zero", "Use projeto online ou importe um .zip do seu computador."),
     el("span", {
       className: "muted",
-      textContent: "Basta escolher a pasta onde o pack sera salvo. O editor cria a estrutura base automaticamente.",
+      textContent: "O fluxo principal do site agora fica focado em projetos online e packs importados em .zip.",
     }),
     el("div", { className: "compact-actions" }, ...actions)
   );
@@ -4380,12 +4618,48 @@ function saveSoundToLibrary(soundFile, options = {}) {
   setStatus(`Audio "${normalized.name}" salvo na biblioteca.`, "success");
 }
 
-function deleteSoundFromLibrary(entryId) {
-  state.audioLibrary = state.audioLibrary.filter((entry) => entry.id !== entryId);
-  persistAudioLibrary();
-  renderAudioLibraryPanel();
-  renderAudioClipEditorPanel();
-  setStatus("Audio removido da biblioteca.", "success");
+async function deleteSoundFromLibrary(entryOrId, pad = null) {
+  const entry =
+    typeof entryOrId === "object" && entryOrId
+      ? entryOrId
+      : state.audioLibrary.find((item) => item.id === entryOrId) || null;
+  if (!entry) {
+    setStatus("Audio nao encontrado na biblioteca.", "error");
+    return;
+  }
+
+  const previousProject = state.project ? structuredClone(state.project) : null;
+  const previousAudioLibrary = structuredClone(state.audioLibrary);
+  try {
+    state.audioLibrary = state.audioLibrary.filter((item) => item.id !== entry.id && item.soundFile !== entry.soundFile);
+    removeSoundReferencesFromProject(entry.soundFile);
+    persistAudioLibrary();
+
+    if (isCloudProject() && entry.storagePath) {
+      await removeProjectAudioClip(entry.storagePath);
+      await saveCurrentProjectOnline({ quiet: true, rethrow: true });
+      syncAudioLibraryFromProject(state.project);
+    }
+
+    renderAudioLibraryPanel();
+    renderAudioClipEditorPanel();
+    renderSoundLibrary();
+    renderGrid();
+    renderStats();
+    if (pad) {
+      renderSoundEditor(pad);
+    } else {
+      renderSelectedPadEditor();
+    }
+    setStatus(`Audio "${entry.name || fileStem(entry.soundFile)}" removido da biblioteca.`, "success");
+  } catch (error) {
+    if (previousProject) {
+      state.project = previousProject;
+    }
+    state.audioLibrary = previousAudioLibrary;
+    renderAll();
+    setStatus(error.message || "Falha ao remover o audio da biblioteca.", "error");
+  }
 }
 
 async function applyLibrarySoundToPad(entry, pad) {
@@ -4447,6 +4721,22 @@ function syncAudioLibraryFromProject(project = state.project) {
     merged.push(entry);
   });
   state.audioLibrary = merged;
+}
+
+function removeSoundReferencesFromProject(soundFile) {
+  if (!state.project || !soundFile) return;
+  const targetFile = String(soundFile).trim();
+  state.project.sounds = (state.project.sounds || []).filter((entry) => String(entry.path || "").trim() !== targetFile);
+  Object.values(state.project.pads || {}).forEach((pad) => {
+    pad.sounds = (pad.sounds || []).filter((sound) => String(sound.soundFile || "").trim() !== targetFile);
+  });
+  const selectedPad = getSelectedPad();
+  if (selectedPad) {
+    clampPadSelection(selectedPad);
+  } else {
+    state.selectedSoundIndex = 0;
+  }
+  state.project.stats = buildProjectStatsSnapshot();
 }
 
 function fileStem(path) {
@@ -4527,6 +4817,33 @@ function saveAnimationToLibrary(animation, pad) {
   persistLedLibrary();
   setStatus(`Animacao "${entry.name}" salva na biblioteca local.`, "success");
   renderLedEditor(pad);
+}
+
+async function publishCurrentEditorAnimation(animation, pad) {
+  if (!animation || !pad) return;
+  const suggestedName = buildLibraryAnimationName(animation, pad);
+  const name = window.prompt("Nome da animacao para publicar na comunidade:", suggestedName);
+  if (!name || !name.trim()) {
+    setStatus("Publicacao cancelada.", "");
+    return;
+  }
+
+  const entry = normalizeLedLibraryEntry({
+    id: createLibraryEntryId(),
+    name: name.trim(),
+    presetName: animation.presetName || "custom",
+    previewColor: animation.previewColor || inferAnimationColor(animation),
+    presetSpeed: animation.presetSpeed || inferAnimationSpeed(animation),
+    loop: animation.loop ?? 1,
+    suffix: animation.suffix || "",
+    originX: pad.x,
+    originY: pad.y,
+    previewRatePercent: getPreviewRatePercent(getPadPreviewKey(pad, state.selectedLedIndex), 100),
+    source: "local",
+    events: animation.events || [],
+  });
+
+  await publishLibraryAnimationEntry(entry, pad);
 }
 
 async function deleteAnimationFromLibrary(entry, pad = null) {
@@ -4666,8 +4983,6 @@ function rerenderLedLibrarySurfaces(pad = null) {
   const selectedPad = pad || getSelectedPad();
   if (selectedPad) {
     renderLedEditor(selectedPad);
-  } else {
-    renderLedLibraryPanel();
   }
   renderLedLibraryPanel();
 }
@@ -4698,6 +5013,18 @@ async function publishLibraryAnimationEntry(entry, pad) {
     return;
   }
   try {
+    const chosenPreviewRate = requestPublishPreviewRatePercent(entry);
+    if (chosenPreviewRate === null) {
+      setStatus("Publicacao cancelada.", "");
+      return;
+    }
+    entry.previewRatePercent = chosenPreviewRate;
+    if (entry.source !== "remote") {
+      updateLocalLibraryEntry(entry);
+      persistLedLibrary();
+      syncLedLibraryState();
+    }
+    rerenderLedLibrarySurfaces(pad);
     setStatus(`Publicando "${entry.name}" na biblioteca online...`);
     await publishAnimation(entry);
     await hydrateSupabaseUser();
@@ -4709,6 +5036,27 @@ async function publishLibraryAnimationEntry(entry, pad) {
   }
 }
 
+function requestPublishPreviewRatePercent(entry) {
+  const currentValue = clampPreviewRatePercent(parseIntSafe(entry?.previewRatePercent, 100));
+  const suggested = String(currentValue);
+  const answer = window.prompt(
+    [
+      `Defina a velocidade do preview online para "${entry?.name || "Animacao"}".`,
+      "Use porcentagem: 100 = normal, maior = mais lento, menor = mais rapido.",
+      "Sugestao para animacao rapida: 140 ou 160.",
+    ].join("\n"),
+    suggested
+  );
+  if (answer === null) {
+    return null;
+  }
+  const trimmed = String(answer || "").trim();
+  if (!trimmed) {
+    return currentValue;
+  }
+  return clampPreviewRatePercent(parseIntSafe(trimmed, currentValue));
+}
+
 function createLedLibraryHeaderActions() {
   if (!hasSupabaseConfig()) return [];
   return [
@@ -4718,10 +5066,11 @@ function createLedLibraryHeaderActions() {
   ];
 }
 
-function createCompactLedLibraryHeaderActions(maxPage, pad) {
+function createCompactLedLibraryHeaderActions(maxPage, pad, _compactPageSize, surface = "editor") {
   const actions = [];
   const totalPages = Math.max(1, maxPage + 1);
-  const currentPage = Math.min(totalPages, state.editorAnimationLibraryPage + 1);
+  const pageStateKey = surface === "editor" ? "editorAnimationLibraryPage" : "ledLibraryPanelPage";
+  const currentPage = Math.min(totalPages, state[pageStateKey] + 1);
   if (hasSupabaseConfig() && state.remoteLedLibrary.length) {
     actions.push(createMiniButton("Atualizar", () => {
       void refreshRemoteLedLibrary({ quiet: false });
@@ -4730,7 +5079,8 @@ function createCompactLedLibraryHeaderActions(maxPage, pad) {
   actions.push(el("span", { className: "pill pill-compact", textContent: `${currentPage}/${totalPages}` }));
   actions.push(
     createMiniButton("←", () => {
-      state.editorAnimationLibraryPage = Math.max(0, state.editorAnimationLibraryPage - 1);
+      stopLedPreview("library");
+      state[pageStateKey] = Math.max(0, state[pageStateKey] - 1);
       if (pad) {
         renderLedEditor(pad);
       } else {
@@ -4738,7 +5088,8 @@ function createCompactLedLibraryHeaderActions(maxPage, pad) {
       }
     }),
     createMiniButton("→", () => {
-      state.editorAnimationLibraryPage = Math.min(maxPage, state.editorAnimationLibraryPage + 1);
+      stopLedPreview("library");
+      state[pageStateKey] = Math.min(maxPage, state[pageStateKey] + 1);
       if (pad) {
         renderLedEditor(pad);
       } else {
@@ -4791,6 +5142,16 @@ function getLedLibraryPanelEntries() {
     return sortCommunityLedLibraryEntries(state.remoteLedLibrary);
   }
   return [...state.localLedLibrary];
+}
+
+function getLedLibraryEntriesForSurface(surface = "default") {
+  if (surface === "editor") {
+    return [...state.localLedLibrary];
+  }
+  if (surface === "panel") {
+    return getLedLibraryPanelEntries();
+  }
+  return [...state.ledLibrary];
 }
 
 function getLedLibraryPanelEmptyMessage() {
@@ -4877,6 +5238,16 @@ function renderCloudProjectsPanel() {
   }
 
   const displayName = getAuthDisplayName(state.authUser);
+  if (refs.dashboardSession) {
+    refs.dashboardSession.hidden = !signedIn;
+    refs.dashboardSession.style.display = signedIn ? "flex" : "none";
+  }
+  if (refs.dashboardUserName) {
+    refs.dashboardUserName.textContent = displayName;
+  }
+  if (refs.dashboardUserEmail) {
+    refs.dashboardUserEmail.textContent = state.authUser?.email || "";
+  }
   if (refs.cloudProjectTitle) {
     refs.cloudProjectTitle.textContent = `Meus projetos`;
   }
@@ -4894,7 +5265,10 @@ function renderCloudProjectsPanel() {
   }
 
   if (refs.cloudProjectCreate) refs.cloudProjectCreate.disabled = !signedIn;
-  if (refs.cloudProjectSave) refs.cloudProjectSave.disabled = !signedIn || !isCloudProject();
+  if (refs.cloudProjectSave) {
+    refs.cloudProjectSave.disabled = !signedIn || !state.project;
+    refs.cloudProjectSave.textContent = isCloudProject() ? "Salvar online" : "Salvar na conta";
+  }
   if (refs.cloudProjectRefresh) refs.cloudProjectRefresh.disabled = !signedIn || state.cloudProjectsLoading;
 
   const statusMessage = state.cloudProjectsLoading
@@ -4903,6 +5277,8 @@ function renderCloudProjectsPanel() {
       ? state.cloudProjectsError
       : isCloudProject()
         ? `Projeto online atual: ${state.project.projectName || state.project.info.title || "Sem nome"}.`
+        : state.project
+          ? "Projeto aberto localmente. Voce pode salvar uma copia dele na sua conta."
         : "Crie um projeto online novo ou abra um que ja esta salvo na sua conta.";
   refs.cloudProjectStatus.textContent = statusMessage;
   refs.cloudProjectStatus.classList.remove("is-error", "is-success");
@@ -4977,9 +5353,6 @@ async function refreshCloudProjects(options = {}) {
     state.cloudProjects = await fetchOwnProjects();
     state.cloudProjectsError = "";
     renderCloudProjectsPanel();
-    if (options.restoreRemembered !== false) {
-      maybeRestoreRememberedCloudProject();
-    }
     if (!options.quiet) {
       setStatus("Projetos online atualizados.", "success");
     }
@@ -5180,20 +5553,6 @@ function normalizeCloudProjectRecord(record) {
     normalized.info.title = normalized.projectName;
   }
   return normalized;
-}
-
-function maybeRestoreRememberedCloudProject() {
-  const remembered = loadRememberedProjectPath();
-  if (!remembered.startsWith("cloud:")) return;
-  const projectId = remembered.slice("cloud:".length).trim();
-  if (!projectId) return;
-  if (state.project?.projectId === projectId) return;
-  const rememberedRecord = state.cloudProjects.find((entry) => entry.id === projectId);
-  if (rememberedRecord) {
-    openCloudProjectRecord(rememberedRecord);
-    return;
-  }
-  clearRememberedProjectPath();
 }
 
 function countMappedPadsInCloudRecord(record) {
@@ -5623,6 +5982,19 @@ async function bytesToBase64(bytes) {
 async function blobToBase64(blob) {
   const dataUrl = await blobToDataUrl(blob);
   return String(dataUrl).split(",", 2)[1] || "";
+}
+
+function base64ToBytes(base64Value) {
+  const normalized = String(base64Value || "").trim();
+  if (!normalized) {
+    return new Uint8Array();
+  }
+  const binary = window.atob(normalized);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function blobToDataUrl(blob) {

@@ -115,6 +115,13 @@ Start command usado no Render:
 python3 server.py --host 0.0.0.0 --port $PORT
 ```
 
+## Configuracao segura do Supabase
+
+- Use `static/supabase-config.example.js` como modelo.
+- Mantenha suas chaves reais apenas em `static/supabase-config.js`.
+- Esse arquivo agora esta no `.gitignore` e nao deve ser enviado ao GitHub.
+- Se ele ja foi versionado antes, remova do indice do Git para evitar novos commits com esse conteudo.
+
 ## O que o editor faz
 
 - Carrega a pasta do projeto real
