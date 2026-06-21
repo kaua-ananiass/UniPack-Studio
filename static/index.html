@@ -23,6 +23,10 @@
               <button id="auth-signup-tab" class="mini-tab" type="button">Criar conta</button>
             </div>
             <div id="auth-guest-panel" class="auth-panel stack">
+              <label id="auth-username-field" class="field" hidden>
+                <span>Nome de usuario</span>
+                <input id="auth-username" type="text" autocomplete="nickname" />
+              </label>
               <label class="field">
                 <span>Email</span>
                 <input id="auth-email" type="email" autocomplete="email" />
@@ -33,6 +37,7 @@
               </label>
               <div class="button-row auth-row">
                 <button id="auth-submit" type="button" class="primary">Entrar</button>
+                <button id="auth-forgot-password" type="button" class="mini">Esqueci a senha</button>
               </div>
               <p id="auth-status" class="auth-status">Use email e senha para entrar no site.</p>
             </div>

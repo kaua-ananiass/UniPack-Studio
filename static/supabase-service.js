@@ -125,12 +125,17 @@ export function onAuthStateChange(callback) {
   return supabase.auth.onAuthStateChange(callback);
 }
 
-export async function signUpWithEmail(email, password, redirectTo) {
+export async function signUpWithEmail(email, password, redirectTo, username = "") {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    options: redirectTo ? { emailRedirectTo: redirectTo } : undefined,
+    options: {
+      ...(redirectTo ? { emailRedirectTo: redirectTo } : {}),
+      data: {
+        name: String(username || "").trim(),
+      },
+    },
   });
   if (error) throw error;
   return data;
@@ -150,6 +155,24 @@ export async function signOutCurrentUser() {
   const supabase = getSupabaseClient();
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
+}
+
+export async function sendPasswordResetEmail(email, redirectTo) {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo,
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function updateCurrentUserPassword(password) {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase.auth.updateUser({
+    password,
+  });
+  if (error) throw error;
+  return data;
 }
 
 async function requireAuthenticatedUser() {

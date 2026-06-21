@@ -11,10 +11,12 @@ import {
   onAuthStateChange,
   publishAnimation,
   removeProjectAudioClip,
+  sendPasswordResetEmail,
   signInWithEmail,
   signOutCurrentUser,
   signUpWithEmail,
   uploadProjectAudioClip,
+  updateCurrentUserPassword,
   updateCloudProjectRecord,
 } from "./supabase-service.js";
 
@@ -121,9 +123,12 @@ const refs = {
   authSignupTab: document.querySelector("#auth-signup-tab"),
   authGuestPanel: document.querySelector("#auth-guest-panel"),
   authUserPanel: document.querySelector("#auth-user-panel"),
+  authUsernameField: document.querySelector("#auth-username-field"),
+  authUsername: document.querySelector("#auth-username"),
   authEmail: document.querySelector("#auth-email"),
   authPassword: document.querySelector("#auth-password"),
   authSubmit: document.querySelector("#auth-submit"),
+  authForgotPassword: document.querySelector("#auth-forgot-password"),
   authStatus: document.querySelector("#auth-status"),
   authUserName: document.querySelector("#auth-user-name"),
   authUserEmail: document.querySelector("#auth-user-email"),
@@ -257,6 +262,9 @@ refs.authSignupTab?.addEventListener("click", () => {
 refs.authSubmit?.addEventListener("click", () => {
   void handleAuthSubmit();
 });
+refs.authForgotPassword?.addEventListener("click", () => {
+  void handleForgotPassword();
+});
 refs.authPassword?.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     void handleAuthSubmit();
@@ -359,6 +367,9 @@ refs.ledStudioAddButton?.addEventListener("click", () => {
   if (!pad) return;
   state.ledLibraryPickerOpen = !state.ledLibraryPickerOpen;
   renderLedEditor(pad);
+});
+window.addEventListener("keydown", (event) => {
+  handleLedStudioKeyboardNavigation(event);
 });
 refs.clipCloseButton.addEventListener("click", () => closeAudioEditor());
 refs.clipFileInput.addEventListener("click", () => {
@@ -1872,23 +1883,19 @@ function createLedStudioFrameNavigator(studio) {
       "div",
       { className: "compact-actions led-studio-frame-actions" },
       createMiniButton("Anterior", () => {
-        state.ledStudioEditor.currentFrameIndex = Math.max(0, state.ledStudioEditor.currentFrameIndex - 1);
-        state.ledStudioEditor.isPlaying = false;
-        renderLedStudioPanel();
+        navigateLedStudioFrame(-1);
       }),
       createMiniButton("Proximo", () => {
-        state.ledStudioEditor.currentFrameIndex = Math.min(
-          state.ledStudioEditor.frames.length - 1,
-          state.ledStudioEditor.currentFrameIndex + 1
-        );
-        state.ledStudioEditor.isPlaying = false;
-        renderLedStudioPanel();
+        navigateLedStudioFrame(1);
       }),
       createMiniButton("Adicionar frame", () => {
         insertLedStudioFrameAfterCurrent(false);
       }),
       createMiniButton("Duplicar frame", () => {
         insertLedStudioFrameAfterCurrent(true);
+      }),
+      createMiniButton("Inverter sequencia", () => {
+        reverseLedStudioFrameSequence();
       }),
       createMiniButton("Remover frame", () => {
         removeCurrentLedStudioFrame();
@@ -1916,13 +1923,61 @@ function createLedStudioFrameStrip(studio) {
       el("small", { textContent: `${litPads} pad(s) aceso(s)` })
     );
     button.addEventListener("click", () => {
-      state.ledStudioEditor.currentFrameIndex = index;
-      state.ledStudioEditor.isPlaying = false;
-      renderLedStudioPanel();
+      setLedStudioCurrentFrame(index);
     });
     strip.append(button);
   });
   return el("div", { className: "led-studio-frame-carousel" }, strip);
+}
+
+function handleLedStudioKeyboardNavigation(event) {
+  if (state.currentView !== "led" || !state.project || !getSelectedPad()) return;
+  if (isTypingTarget(event.target)) return;
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    navigateLedStudioFrame(-1);
+    return;
+  }
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    navigateLedStudioFrame(1);
+  }
+}
+
+function isTypingTarget(target) {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest(
+      'input:not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), textarea, select, [contenteditable="true"]'
+    )
+  );
+}
+
+function setLedStudioCurrentFrame(index) {
+  const frames = state.ledStudioEditor.frames || [];
+  if (!frames.length) return;
+  state.ledStudioEditor.currentFrameIndex = clampIndex(index, frames.length);
+  state.ledStudioEditor.isPlaying = false;
+  renderLedStudioPanel();
+}
+
+function navigateLedStudioFrame(step) {
+  const frames = state.ledStudioEditor.frames || [];
+  if (!frames.length) return;
+  setLedStudioCurrentFrame(state.ledStudioEditor.currentFrameIndex + step);
+}
+
+function reverseLedStudioFrameSequence() {
+  const frames = state.ledStudioEditor.frames || [];
+  if (frames.length <= 1) return;
+  const mirroredIndex = Math.max(0, frames.length - 1 - state.ledStudioEditor.currentFrameIndex);
+  state.ledStudioEditor.frames = [...frames].reverse();
+  state.ledStudioEditor.currentFrameIndex = mirroredIndex;
+  state.ledStudioEditor.isPlaying = false;
+  renderLedStudioPanel();
+  setStatus("Sequencia de frames invertida com sucesso.", "success");
 }
 
 function insertLedStudioFrameAfterCurrent(duplicateCurrent) {
@@ -4967,7 +5022,7 @@ function mapRemoteLedLibraryEntry(row) {
     originY: row.origin_y,
     previewRatePercent: row.preview_rate_percent,
     authorId: row.author_id,
-    authorName: row.author_name,
+    authorName: getCommunityAuthorDisplayName(row.author_name),
     createdAt: row.created_at,
     ratingAvg: row.rating_avg ?? row.rating ?? 0,
     downloadCount: row.download_count ?? row.downloads ?? 0,
@@ -5137,6 +5192,19 @@ function buildCompactLedLibraryMetaText(entry, animation) {
     parts.push(entry.authorName);
   }
   return parts.join(" · ");
+}
+
+function getCommunityAuthorDisplayName(rawValue) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return "Usuario";
+  const source = raw.includes("@") ? raw.split("@")[0] : raw;
+  const cleaned = source.replace(/[._-]+/g, " ").trim();
+  if (!cleaned) return "Usuario";
+  return cleaned
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function getLedLibraryPanelEntries() {
@@ -5594,11 +5662,14 @@ async function initializeAuth() {
     if (state.authUser) {
       await refreshCloudProjects({ quiet: true });
     }
-    onAuthStateChange((_event, sessionData) => {
+    onAuthStateChange((event, sessionData) => {
       state.authUser = sessionData?.user || null;
       state.supabaseUserId = String(state.authUser?.id || "");
       renderAuthPanel();
       state.cloudProjectsError = "";
+      if (event === "PASSWORD_RECOVERY") {
+        void promptForRecoveredPassword();
+      }
       if (!state.authUser) {
         state.cloudProjects = [];
         if (isCloudProject()) {
@@ -5636,11 +5707,21 @@ function renderAuthPanel(message = "") {
   if (refs.authGuestPanel) {
     refs.authGuestPanel.hidden = hasUser;
   }
+  if (refs.authUsernameField) {
+    const showUsernameField = !hasUser && state.authMode === "signup";
+    refs.authUsernameField.hidden = !showUsernameField;
+    refs.authUsernameField.style.display = showUsernameField ? "" : "none";
+  }
   if (refs.authUserPanel) {
     refs.authUserPanel.hidden = !hasUser;
   }
   if (refs.authSubmit) {
     refs.authSubmit.textContent = state.authMode === "signup" ? "Criar conta" : "Entrar";
+  }
+  if (refs.authForgotPassword) {
+    const showForgotPassword = !hasUser && state.authMode === "signin";
+    refs.authForgotPassword.hidden = !showForgotPassword;
+    refs.authForgotPassword.style.display = showForgotPassword ? "" : "none";
   }
   if (refs.authStatus) {
     refs.authStatus.textContent = message || (
@@ -5693,6 +5774,7 @@ async function handleAuthSubmit() {
   }
   const email = String(refs.authEmail?.value || "").trim();
   const password = String(refs.authPassword?.value || "");
+  const username = String(refs.authUsername?.value || "").trim();
   if (!email || !password) {
     renderAuthPanel("Preencha email e senha.");
     return;
@@ -5700,9 +5782,20 @@ async function handleAuthSubmit() {
 
   try {
     if (state.authMode === "signup") {
+      if (!username) {
+        renderAuthPanel("Escolha um nome de usuario para criar a conta.");
+        return;
+      }
       const redirectTo = `${window.location.origin}${window.location.pathname}`;
-      await signUpWithEmail(email, password, redirectTo);
+      const signUpResult = await signUpWithEmail(email, password, redirectTo, username);
+      const identities = Array.isArray(signUpResult?.user?.identities) ? signUpResult.user.identities : null;
+      if (identities && identities.length === 0) {
+        renderAuthPanel("Esse email ja esta cadastrado. Tente entrar ou redefinir sua senha.");
+        setStatus("Esse email ja esta cadastrado.", "error");
+        return;
+      }
       refs.authPassword.value = "";
+      if (refs.authUsername) refs.authUsername.value = "";
       renderAuthPanel("Conta criada. Verifique seu email e clique no link de confirmacao.");
       setStatus("Conta criada. Um email de confirmacao foi enviado.", "success");
       return;
@@ -5714,9 +5807,89 @@ async function handleAuthSubmit() {
     renderAuthPanel("Login realizado com sucesso.");
     setStatus("Login realizado com sucesso.", "success");
   } catch (error) {
-    renderAuthPanel(error.message || "Falha ao autenticar.");
-    setStatus(error.message || "Falha ao autenticar.", "error");
+    const authMessage = getFriendlyAuthErrorMessage(error, state.authMode);
+    renderAuthPanel(authMessage);
+    setStatus(authMessage, "error");
   }
+}
+
+async function handleForgotPassword() {
+  if (!hasSupabaseConfig()) {
+    renderAuthPanel(SUPABASE_SETUP_HINT);
+    return;
+  }
+  const email = String(refs.authEmail?.value || "").trim();
+  if (!email) {
+    renderAuthPanel("Digite seu email para receber o link de redefinicao.");
+    return;
+  }
+  try {
+    const redirectTo = `${window.location.origin}${window.location.pathname}`;
+    await sendPasswordResetEmail(email, redirectTo);
+    renderAuthPanel("Link de redefinicao enviado. Confira seu email.");
+    setStatus("Link para redefinir a senha enviado com sucesso.", "success");
+  } catch (error) {
+    const authMessage = getFriendlyAuthErrorMessage(error, "reset");
+    renderAuthPanel(authMessage);
+    setStatus(authMessage, "error");
+  }
+}
+
+async function promptForRecoveredPassword() {
+  const nextPassword = window.prompt("Digite sua nova senha para concluir a recuperacao:");
+  if (nextPassword === null) {
+    renderAuthPanel("Recuperacao aberta. Quando quiser, use o link novamente para trocar a senha.");
+    return;
+  }
+  const normalizedPassword = String(nextPassword || "").trim();
+  if (normalizedPassword.length < 6) {
+    renderAuthPanel("Sua nova senha precisa ter pelo menos 6 caracteres.");
+    setStatus("Senha muito curta para redefinicao.", "error");
+    return;
+  }
+  try {
+    await updateCurrentUserPassword(normalizedPassword);
+    renderAuthPanel("Senha atualizada com sucesso. Agora voce pode entrar normalmente.");
+    setStatus("Senha redefinida com sucesso.", "success");
+  } catch (error) {
+    const authMessage = getFriendlyAuthErrorMessage(error, "reset");
+    renderAuthPanel(authMessage);
+    setStatus(authMessage, "error");
+  }
+}
+
+function getFriendlyAuthErrorMessage(error, mode = "signin") {
+  const raw = String(error?.message || "").trim();
+  const normalized = raw.toLowerCase();
+  if (mode === "signup") {
+    if (
+      normalized.includes("already registered")
+      || normalized.includes("already been registered")
+      || normalized.includes("user already registered")
+      || normalized.includes("email address is invalid")
+      || normalized.includes("email exists")
+    ) {
+      return "Esse email ja esta cadastrado. Tente entrar ou redefinir sua senha.";
+    }
+  }
+  if (mode === "reset") {
+    if (normalized.includes("email not confirmed")) {
+      return "Confirme seu email antes de redefinir a senha.";
+    }
+  }
+  if (normalized.includes("invalid login credentials")) {
+    return "Email ou senha incorretos.";
+  }
+  if (normalized.includes("email not confirmed")) {
+    return "Seu email ainda nao foi confirmado.";
+  }
+  if (normalized.includes("password should be at least")) {
+    return "A senha precisa ter pelo menos 6 caracteres.";
+  }
+  if (normalized.includes("for security purposes")) {
+    return "Aguarde um pouco antes de tentar novamente.";
+  }
+  return raw || "Falha ao autenticar.";
 }
 
 async function handleAuthSignOut() {
