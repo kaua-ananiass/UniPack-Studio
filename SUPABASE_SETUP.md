@@ -17,7 +17,13 @@
    - `SUPABASE_URL`
    - `SUPABASE_PUBLISHABLE_KEY`
 7. Reinicie o editor local com `python3 server.py`.
-8. Teste:
+8. Se o site estiver no Render, abra `Environment` e adicione:
+   - `SUPABASE_URL`
+   - `SUPABASE_PUBLISHABLE_KEY`
+   - `SUPABASE_LIBRARY_TABLE=led_library`
+   - `SUPABASE_PROJECT_AUDIO_BUCKET=project-audio`
+9. Depois clique em `Manual Deploy` ou faça um novo push para redeploy.
+10. Teste:
    - criar conta com email e senha
    - confirmar o email recebido
    - entrar no editor

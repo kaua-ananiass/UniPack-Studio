@@ -26,6 +26,8 @@ const AUDIO_CLIP_DRAFT_STORE_NAME = "drafts";
 const MIN_AUDIBLE_SAMPLE = 0.0025;
 const MIN_CLIP_DURATION_SECONDS = 0.001;
 const MIN_PREVIEW_FRAME_MS = 20;
+const SUPABASE_SETUP_HINT =
+  "Supabase nao configurado. No Render, adicione SUPABASE_URL e SUPABASE_PUBLISHABLE_KEY nas variaveis do servico.";
 
 const state = {
   project: null,
@@ -5579,7 +5581,7 @@ function formatDateTime(value) {
 
 async function initializeAuth() {
   if (!hasSupabaseConfig()) {
-    renderAuthPanel("Preencha o Supabase para ativar login com email e senha.");
+    renderAuthPanel(SUPABASE_SETUP_HINT);
     renderCloudProjectsPanel();
     return;
   }
@@ -5686,7 +5688,7 @@ function getAuthUserMetaText(user) {
 
 async function handleAuthSubmit() {
   if (!hasSupabaseConfig()) {
-    renderAuthPanel("Configure o Supabase antes de ativar o login.");
+    renderAuthPanel(SUPABASE_SETUP_HINT);
     return;
   }
   const email = String(refs.authEmail?.value || "").trim();

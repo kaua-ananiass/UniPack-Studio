@@ -8,3 +8,11 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_LIBRARY_TABLE
+        value: led_library
+      - key: SUPABASE_PROJECT_AUDIO_BUCKET
+        value: project-audio
