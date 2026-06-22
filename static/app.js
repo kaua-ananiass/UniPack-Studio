@@ -28,6 +28,8 @@ const AUDIO_CLIP_DRAFT_STORE_NAME = "drafts";
 const MIN_AUDIBLE_SAMPLE = 0.0025;
 const MIN_CLIP_DURATION_SECONDS = 0.001;
 const MIN_PREVIEW_FRAME_MS = 20;
+const AUDIO_CLIP_EXPORT_SAMPLE_RATE = 44100;
+const AUDIO_CLIP_EXPORT_CHANNELS = 2;
 const SUPABASE_SETUP_HINT =
   "Supabase nao configurado. No Render, adicione SUPABASE_URL e SUPABASE_PUBLISHABLE_KEY nas variaveis do servico.";
 
@@ -2788,8 +2790,7 @@ async function saveAudioClipSelection() {
       padKey: state.audioClipEditor.padKey,
       soundIndex: state.audioClipEditor.soundIndex,
     };
-    const clip = buildAudioClipBuffer();
-    const bytes = encodeAudioBufferToWavBytes(clip);
+    const bytes = await buildAudioClipExportBytes();
     payloadBody.audioBase64 = await bytesToBase64(bytes);
 
     const response = await fetch("/api/sound/import", {
@@ -2856,8 +2857,33 @@ async function saveAudioClipSelectionOnline(fileName) {
 }
 
 async function buildAudioClipExportBytes() {
-  const clip = buildAudioClipBuffer();
+  const clip = await buildStandardAudioClipBuffer();
   return encodeAudioBufferToWavBytes(clip);
+}
+
+async function buildStandardAudioClipBuffer() {
+  const selectionDuration = Math.max(MIN_CLIP_DURATION_SECONDS, audioClipSelectionDuration());
+  const frameCount = Math.max(1, Math.ceil(selectionDuration * AUDIO_CLIP_EXPORT_SAMPLE_RATE));
+  const startTime = Math.max(0, state.audioClipEditor.selectionStart);
+  const sourceBuffer = state.audioClipEditor.audioBuffer;
+  if (!sourceBuffer) {
+    throw new Error("Nao foi possivel preparar o audio para exportacao.");
+  }
+
+  if (typeof window.OfflineAudioContext === "function") {
+    const offline = new window.OfflineAudioContext(
+      AUDIO_CLIP_EXPORT_CHANNELS,
+      frameCount,
+      AUDIO_CLIP_EXPORT_SAMPLE_RATE
+    );
+    const source = offline.createBufferSource();
+    source.buffer = sourceBuffer;
+    source.connect(offline.destination);
+    source.start(0, startTime, selectionDuration);
+    return await offline.startRendering();
+  }
+
+  return buildAudioClipBuffer();
 }
 
 function continueAudioClipFromSelectionEnd() {
