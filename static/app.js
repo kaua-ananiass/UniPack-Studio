@@ -28,8 +28,6 @@ const AUDIO_CLIP_DRAFT_STORE_NAME = "drafts";
 const MIN_AUDIBLE_SAMPLE = 0.0025;
 const MIN_CLIP_DURATION_SECONDS = 0.001;
 const MIN_PREVIEW_FRAME_MS = 20;
-const AUDIO_CLIP_EXPORT_SAMPLE_RATE = 44100;
-const AUDIO_CLIP_EXPORT_CHANNELS = 2;
 const SUPABASE_SETUP_HINT =
   "Supabase nao configurado. No Render, adicione SUPABASE_URL e SUPABASE_PUBLISHABLE_KEY nas variaveis do servico.";
 
@@ -2857,46 +2855,72 @@ async function saveAudioClipSelectionOnline(fileName) {
 }
 
 async function buildAudioClipExportBytes() {
-  const clip = await buildStandardAudioClipBuffer();
-  return encodeAudioBufferToWavBytes(clip);
+  return buildAudioClipWavBytes();
 }
 
-async function buildStandardAudioClipBuffer() {
+async function buildAudioClipWavBytes() {
   const startTime = Math.max(0, state.audioClipEditor.selectionStart);
   const endTime = Math.max(startTime + MIN_CLIP_DURATION_SECONDS, state.audioClipEditor.selectionEnd);
-  const selectionDuration = Math.max(MIN_CLIP_DURATION_SECONDS, endTime - startTime);
-  const frameCount = Math.max(1, Math.round(selectionDuration * AUDIO_CLIP_EXPORT_SAMPLE_RATE));
   const sourceBuffer = state.audioClipEditor.audioBuffer;
   if (!sourceBuffer) {
     throw new Error("Nao foi possivel preparar o audio para exportacao.");
   }
-  state.audioClipEditor.audioContext ||= new AudioContext();
-  const output = state.audioClipEditor.audioContext.createBuffer(
-    AUDIO_CLIP_EXPORT_CHANNELS,
-    frameCount,
-    AUDIO_CLIP_EXPORT_SAMPLE_RATE
-  );
-  const sourceRate = sourceBuffer.sampleRate;
+  const sourceRate = Math.max(1, sourceBuffer.sampleRate);
+  const sourceFrameStart = Math.max(0, Math.floor(startTime * sourceRate));
+  const sourceFrameEnd = Math.min(sourceBuffer.length, Math.max(sourceFrameStart + 1, Math.ceil(endTime * sourceRate)));
+  const outputFrameCount = Math.max(1, sourceFrameEnd - sourceFrameStart);
+  const outputChannels = sourceBuffer.numberOfChannels <= 1 ? 2 : Math.min(2, sourceBuffer.numberOfChannels);
   const sourceFrameLimit = Math.max(0, sourceBuffer.length - 1);
+  const bytesPerSample = 2;
+  const blockAlign = outputChannels * bytesPerSample;
+  const dataSize = outputFrameCount * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
 
-  for (let channel = 0; channel < AUDIO_CLIP_EXPORT_CHANNELS; channel += 1) {
-    const sourceChannel = Math.min(channel, sourceBuffer.numberOfChannels - 1);
-    const sourceData = sourceBuffer.getChannelData(sourceChannel);
-    const outputData = output.getChannelData(channel);
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, outputChannels, true);
+  view.setUint32(24, sourceRate, true);
+  view.setUint32(28, sourceRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, dataSize, true);
 
-    for (let index = 0; index < frameCount; index += 1) {
-      const time = startTime + index / AUDIO_CLIP_EXPORT_SAMPLE_RATE;
-      const sourcePosition = Math.min(sourceFrameLimit, Math.max(0, time * sourceRate));
-      const leftIndex = Math.floor(sourcePosition);
-      const rightIndex = Math.min(sourceFrameLimit, leftIndex + 1);
-      const mix = sourcePosition - leftIndex;
-      const leftSample = sourceData[leftIndex] || 0;
-      const rightSample = sourceData[rightIndex] || 0;
-      outputData[index] = leftSample + (rightSample - leftSample) * mix;
+  let offset = 44;
+  const sourceChannels = Array.from(
+    { length: Math.max(1, sourceBuffer.numberOfChannels) },
+    (_, channel) => sourceBuffer.getChannelData(channel)
+  );
+  const frameChunkSize = 16384;
+  for (let chunkStart = 0; chunkStart < outputFrameCount; chunkStart += frameChunkSize) {
+    const chunkEnd = Math.min(outputFrameCount, chunkStart + frameChunkSize);
+    for (let index = chunkStart; index < chunkEnd; index += 1) {
+      const sourceIndex = Math.min(sourceFrameLimit, sourceFrameStart + index);
+      for (let channel = 0; channel < outputChannels; channel += 1) {
+        const sourceChannelIndex = Math.min(channel, sourceChannels.length - 1);
+        const sample = sourceChannels[sourceChannelIndex][sourceIndex] || 0;
+        const clamped = Math.max(-1, Math.min(1, sample));
+        view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+        offset += 2;
+      }
+    }
+    if (chunkEnd < outputFrameCount) {
+      await yieldToBrowser();
     }
   }
 
-  return output;
+  return new Uint8Array(buffer);
+}
+
+function yieldToBrowser() {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
 }
 
 function continueAudioClipFromSelectionEnd() {
