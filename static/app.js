@@ -2862,28 +2862,41 @@ async function buildAudioClipExportBytes() {
 }
 
 async function buildStandardAudioClipBuffer() {
-  const selectionDuration = Math.max(MIN_CLIP_DURATION_SECONDS, audioClipSelectionDuration());
-  const frameCount = Math.max(1, Math.ceil(selectionDuration * AUDIO_CLIP_EXPORT_SAMPLE_RATE));
   const startTime = Math.max(0, state.audioClipEditor.selectionStart);
+  const endTime = Math.max(startTime + MIN_CLIP_DURATION_SECONDS, state.audioClipEditor.selectionEnd);
+  const selectionDuration = Math.max(MIN_CLIP_DURATION_SECONDS, endTime - startTime);
+  const frameCount = Math.max(1, Math.round(selectionDuration * AUDIO_CLIP_EXPORT_SAMPLE_RATE));
   const sourceBuffer = state.audioClipEditor.audioBuffer;
   if (!sourceBuffer) {
     throw new Error("Nao foi possivel preparar o audio para exportacao.");
   }
+  state.audioClipEditor.audioContext ||= new AudioContext();
+  const output = state.audioClipEditor.audioContext.createBuffer(
+    AUDIO_CLIP_EXPORT_CHANNELS,
+    frameCount,
+    AUDIO_CLIP_EXPORT_SAMPLE_RATE
+  );
+  const sourceRate = sourceBuffer.sampleRate;
+  const sourceFrameLimit = Math.max(0, sourceBuffer.length - 1);
 
-  if (typeof window.OfflineAudioContext === "function") {
-    const offline = new window.OfflineAudioContext(
-      AUDIO_CLIP_EXPORT_CHANNELS,
-      frameCount,
-      AUDIO_CLIP_EXPORT_SAMPLE_RATE
-    );
-    const source = offline.createBufferSource();
-    source.buffer = sourceBuffer;
-    source.connect(offline.destination);
-    source.start(0, startTime, selectionDuration);
-    return await offline.startRendering();
+  for (let channel = 0; channel < AUDIO_CLIP_EXPORT_CHANNELS; channel += 1) {
+    const sourceChannel = Math.min(channel, sourceBuffer.numberOfChannels - 1);
+    const sourceData = sourceBuffer.getChannelData(sourceChannel);
+    const outputData = output.getChannelData(channel);
+
+    for (let index = 0; index < frameCount; index += 1) {
+      const time = startTime + index / AUDIO_CLIP_EXPORT_SAMPLE_RATE;
+      const sourcePosition = Math.min(sourceFrameLimit, Math.max(0, time * sourceRate));
+      const leftIndex = Math.floor(sourcePosition);
+      const rightIndex = Math.min(sourceFrameLimit, leftIndex + 1);
+      const mix = sourcePosition - leftIndex;
+      const leftSample = sourceData[leftIndex] || 0;
+      const rightSample = sourceData[rightIndex] || 0;
+      outputData[index] = leftSample + (rightSample - leftSample) * mix;
+    }
   }
 
-  return buildAudioClipBuffer();
+  return output;
 }
 
 function continueAudioClipFromSelectionEnd() {
@@ -6089,7 +6102,8 @@ function formatSeconds(value) {
 }
 
 function parseFloatSafe(value, fallback) {
-  const parsed = Number.parseFloat(value);
+  const normalized = String(value ?? "").trim().replace(",", ".");
+  const parsed = Number.parseFloat(normalized);
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
