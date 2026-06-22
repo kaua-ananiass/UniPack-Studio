@@ -2788,18 +2788,9 @@ async function saveAudioClipSelection() {
       padKey: state.audioClipEditor.padKey,
       soundIndex: state.audioClipEditor.soundIndex,
     };
-
-    if (state.audioClipEditor.sourceBlob) {
-      payloadBody.sourceAudioBase64 = await blobToBase64(state.audioClipEditor.sourceBlob);
-      payloadBody.sourceFileName = state.audioClipEditor.sourceName;
-      payloadBody.sourceMimeType = state.audioClipEditor.sourceMimeType;
-      payloadBody.selectionStart = state.audioClipEditor.selectionStart;
-      payloadBody.selectionEnd = state.audioClipEditor.selectionEnd;
-    } else {
-      const clip = buildAudioClipBuffer();
-      const bytes = encodeAudioBufferToWavBytes(clip);
-      payloadBody.audioBase64 = await bytesToBase64(bytes);
-    }
+    const clip = buildAudioClipBuffer();
+    const bytes = encodeAudioBufferToWavBytes(clip);
+    payloadBody.audioBase64 = await bytesToBase64(bytes);
 
     const response = await fetch("/api/sound/import", {
       method: "POST",
@@ -2865,25 +2856,6 @@ async function saveAudioClipSelectionOnline(fileName) {
 }
 
 async function buildAudioClipExportBytes() {
-  if (state.audioClipEditor.sourceBlob) {
-    const response = await fetch("/api/sound/clip", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sourceAudioBase64: await blobToBase64(state.audioClipEditor.sourceBlob),
-        sourceFileName: state.audioClipEditor.sourceName,
-        sourceMimeType: state.audioClipEditor.sourceMimeType,
-        selectionStart: state.audioClipEditor.selectionStart,
-        selectionEnd: state.audioClipEditor.selectionEnd,
-      }),
-    });
-    const payload = await readJsonResponse(response);
-    if (!response.ok) {
-      throw new Error(payload.error || "Falha ao preparar o corte do audio.");
-    }
-    return base64ToBytes(payload.audioBase64 || "");
-  }
-
   const clip = buildAudioClipBuffer();
   return encodeAudioBufferToWavBytes(clip);
 }
