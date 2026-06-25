@@ -695,21 +695,15 @@ async function exportProjectZip() {
     setStatus("Nenhum projeto carregado para exportar.", "error");
     return false;
   }
-  if (isCloudProject()) {
-    setStatus("Exportacao .zip ainda funciona apenas para projetos locais.", "error");
-    return false;
-  }
 
-  setStatus("Salvando e exportando projeto...");
+  setStatus("Preparando exportacao do projeto...");
   try {
     await saveProject({ quiet: true, rethrow: true });
+    const requestPayload = await buildProjectExportRequestPayload();
     const response = await fetch("/api/project/export", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        projectPath: state.project.projectPath,
-        fileName: state.project.info?.title || projectFolderName(state.project.projectPath) || "UniPack",
-      }),
+      body: JSON.stringify(requestPayload),
     });
     const payload = await readJsonResponse(response);
     if (!response.ok) {
@@ -719,12 +713,84 @@ async function exportProjectZip() {
       setStatus("Exportacao cancelada.", "");
       return false;
     }
-    setStatus(`Projeto exportado em ${payload.exportPath}.`, "success");
+    const zipBase64 = String(payload.zipBase64 || "").trim();
+    if (!zipBase64) {
+      throw new Error("O servidor nao retornou o arquivo .zip para download.");
+    }
+    downloadBase64File(zipBase64, payload.fileName || "UniPack.zip", "application/zip");
+    setStatus(`Projeto "${payload.fileName || "UniPack.zip"}" exportado com sucesso.`, "success");
     return true;
   } catch (error) {
     setStatus(error.message || "Falha ao exportar o projeto.", "error");
     return false;
   }
+}
+
+async function buildProjectExportRequestPayload() {
+  const fileName =
+    state.project?.info?.title
+    || projectFolderName(state.project?.projectPath)
+    || state.project?.projectName
+    || "UniPack";
+
+  if (!isCloudProject()) {
+    return {
+      browserDownload: true,
+      projectPath: state.project.projectPath,
+      fileName,
+    };
+  }
+
+  return {
+    browserDownload: true,
+    fileName,
+    projectData: buildProjectExportData(state.project),
+    soundFiles: await collectProjectSoundFilesForExport(),
+  };
+}
+
+function buildProjectExportData(project = state.project) {
+  return {
+    casing: structuredClone(project?.casing || {
+      info: "Info",
+      keySound: "keySound",
+      keyLED: "keyLED",
+      sounds: "Sounds",
+      autoPlay: "autoPlay",
+    }),
+    info: structuredClone(project?.info || {}),
+    infoExtra: structuredClone(project?.infoExtra || []),
+    pads: structuredClone(project?.pads || {}),
+    sounds: structuredClone(project?.sounds || []),
+    autoPlay: structuredClone(project?.autoPlay || []),
+  };
+}
+
+async function collectProjectSoundFilesForExport() {
+  const projectSounds = [...(state.project?.sounds || [])];
+  const exportedFiles = [];
+
+  for (const soundEntry of projectSounds) {
+    const relativePath = String(soundEntry?.path || "").trim();
+    if (!relativePath) continue;
+    const bytes = await fetchProjectSoundBytesForExport(relativePath);
+    exportedFiles.push({
+      path: relativePath,
+      mimeType: String(soundEntry?.mimeType || "audio/wav").trim() || "audio/wav",
+      audioBase64: await bytesToBase64(bytes),
+    });
+  }
+
+  return exportedFiles;
+}
+
+async function fetchProjectSoundBytesForExport(soundFile) {
+  const playbackUrl = await resolveSoundPlaybackUrl(soundFile);
+  const response = await fetch(playbackUrl, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Nao foi possivel ler o audio "${soundFile}" para exportacao.`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 async function chooseFolderInto(input) {
@@ -875,8 +941,8 @@ function renderSessionLayout() {
     refs.saveProject.style.display = "none";
   }
   if (refs.exportProject) {
-    refs.exportProject.hidden = true;
-    refs.exportProject.style.display = "none";
+    refs.exportProject.hidden = false;
+    refs.exportProject.style.display = "";
   }
   if (refs.viewNavbar) {
     refs.viewNavbar.hidden = !hasProject;
@@ -885,7 +951,7 @@ function renderSessionLayout() {
 }
 
 function renderViewNavigation() {
-  if (!state.authUser || !state.project) {
+  if (!state.authUser) {
     stopLedPreview("studio");
     stopLedPreview("pad");
     refs.mainViewShell.hidden = true;
@@ -902,29 +968,34 @@ function renderViewNavigation() {
     refs.viewLibraryTab.classList.remove("is-active");
     return;
   }
+  const hasProject = Boolean(state.project);
   const isEditor = state.currentView === "editor";
   const isAudio = state.currentView === "audio";
   const isLed = state.currentView === "led";
   const isLibrary = state.currentView === "library";
+  refs.viewMainTab.disabled = !hasProject;
+  refs.viewAudioTab.disabled = !hasProject;
+  refs.viewLedTab.disabled = !hasProject;
+  refs.viewLibraryTab.disabled = !hasProject;
   if (!isLed) {
     stopLedPreview("studio");
   }
-  refs.mainViewShell.hidden = !isEditor;
-  refs.mainViewShell.style.display = isEditor ? "" : "none";
+  refs.mainViewShell.hidden = !hasProject || !isEditor;
+  refs.mainViewShell.style.display = hasProject && isEditor ? "" : "none";
   if (refs.audioSidebar) {
     refs.audioSidebar.hidden = isEditor;
   }
   refs.mainWorkspace.classList.toggle("is-editor-only", isEditor);
-  refs.clipEditorPanel.hidden = !isAudio;
-  refs.clipEditorPanel.style.display = isAudio ? "grid" : "none";
-  refs.ledStudioPanel.hidden = !isLed;
-  refs.ledStudioPanel.style.display = isLed ? "grid" : "none";
-  refs.ledLibraryPanel.hidden = !isLibrary;
-  refs.ledLibraryPanel.style.display = isLibrary ? "grid" : "none";
-  refs.viewMainTab.classList.toggle("is-active", isEditor);
-  refs.viewAudioTab.classList.toggle("is-active", isAudio);
-  refs.viewLedTab.classList.toggle("is-active", isLed);
-  refs.viewLibraryTab.classList.toggle("is-active", isLibrary);
+  refs.clipEditorPanel.hidden = !hasProject || !isAudio;
+  refs.clipEditorPanel.style.display = hasProject && isAudio ? "grid" : "none";
+  refs.ledStudioPanel.hidden = !hasProject || !isLed;
+  refs.ledStudioPanel.style.display = hasProject && isLed ? "grid" : "none";
+  refs.ledLibraryPanel.hidden = !hasProject || !isLibrary;
+  refs.ledLibraryPanel.style.display = hasProject && isLibrary ? "grid" : "none";
+  refs.viewMainTab.classList.toggle("is-active", hasProject && isEditor);
+  refs.viewAudioTab.classList.toggle("is-active", hasProject && isAudio);
+  refs.viewLedTab.classList.toggle("is-active", hasProject && isLed);
+  refs.viewLibraryTab.classList.toggle("is-active", hasProject && isLibrary);
 }
 
 function renderHeaderBits() {
@@ -942,7 +1013,7 @@ function renderHeaderBits() {
   }
   refs.soundCountPill.hidden = false;
   refs.saveProject.disabled = false;
-  refs.exportProject.disabled = isCloudProject();
+  refs.exportProject.disabled = false;
   refs.toggleProjectPanel.disabled = false;
   refs.projectTitlePill.textContent = state.project.info.title || "Sem titulo";
   refs.soundCountPill.textContent = `${state.project.sounds.length} arquivos`;
@@ -6206,6 +6277,21 @@ function base64ToBytes(base64Value) {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
+}
+
+function downloadBase64File(base64Value, fileName, mimeType = "application/octet-stream") {
+  const bytes = base64ToBytes(base64Value);
+  const blob = new Blob([bytes], { type: mimeType });
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = String(fileName || "download.bin").trim() || "download.bin";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 1500);
 }
 
 function blobToDataUrl(blob) {

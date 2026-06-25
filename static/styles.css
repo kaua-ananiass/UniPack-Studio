@@ -371,6 +371,11 @@ code {
   border-color: rgba(85, 214, 194, 0.4);
 }
 
+.view-tab:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
 .mini-tabs {
   display: flex;
   gap: 8px;
@@ -1590,12 +1595,6 @@ button.mini {
   margin-top: -4px;
 }
 
-.led-studio-panel,
-.led-library-panel {
-  display: grid;
-  gap: 16px;
-}
-
 .clip-panel-meta {
   align-items: center;
 }
@@ -1892,14 +1891,14 @@ button.mini {
     grid-template-columns: 1fr;
   }
 
-.led-controls {
-  gap: 10px;
-}
+  .led-controls {
+    gap: 10px;
+  }
 
-.field-helper {
-  font-size: 0.76rem;
-  line-height: 1.3;
-}
+  .field-helper {
+    font-size: 0.76rem;
+    line-height: 1.3;
+  }
 
   .stats-grid,
   .row-grid.cols-4,

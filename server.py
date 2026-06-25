@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import io
 import json
 import mimetypes
@@ -168,6 +169,18 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
         raw_body = self.rfile.read(length)
         try:
             payload = json.loads(raw_body.decode("utf-8"))
+            browser_download = bool(payload.get("browserDownload"))
+            if browser_download:
+                archive_name, archive_bytes = self._build_export_archive_bytes(payload)
+                self._send_json(
+                    {
+                        "cancelled": False,
+                        "fileName": archive_name,
+                        "zipBase64": base64.b64encode(archive_bytes).decode("ascii"),
+                    }
+                )
+                return
+
             project_path = Path(payload["projectPath"]).expanduser().resolve()
             if not project_path.exists() or not project_path.is_dir():
                 raise FileNotFoundError(f"Pasta do projeto nao encontrada: {project_path}")
@@ -465,6 +478,77 @@ class UniPackEditorHandler(SimpleHTTPRequestHandler):
     def _count_project_markers(self, root: Path) -> int:
         markers = ("Info", "keySound", "keyLED", "Sounds", "autoPlay")
         return sum(1 for marker in markers if self._detect_case_insensitive_path(root, marker) is not None)
+
+    def _build_export_archive_bytes(self, payload: dict) -> tuple[str, bytes]:
+        project_data = payload.get("projectData")
+        project_path_value = str(payload.get("projectPath") or "").strip()
+        suggested_name = self._sanitize_export_file_name(
+            payload.get("fileName")
+            or Path(project_path_value).name
+            or "UniPack"
+        )
+
+        if project_data and isinstance(project_data, dict):
+            return self._build_export_archive_bytes_from_project_data(project_data, payload, suggested_name)
+        if project_path_value:
+            return self._build_export_archive_bytes_from_project_path(project_path_value, suggested_name)
+        raise ValueError("Projeto invalido para exportacao.")
+
+    def _build_export_archive_bytes_from_project_path(self, project_path_value: str, suggested_name: str) -> tuple[str, bytes]:
+        project_path = Path(project_path_value).expanduser().resolve()
+        if not project_path.exists() or not project_path.is_dir():
+            raise FileNotFoundError(f"Pasta do projeto nao encontrada: {project_path}")
+
+        with tempfile.TemporaryDirectory(prefix="unipack_export_zip_") as temp_dir_name:
+            temp_zip_path = Path(temp_dir_name) / suggested_name
+            archive_path = export_project_zip(project_path, temp_zip_path)
+            return archive_path.name, archive_path.read_bytes()
+
+    def _build_export_archive_bytes_from_project_data(
+        self,
+        project_data: dict,
+        payload: dict,
+        suggested_name: str,
+    ) -> tuple[str, bytes]:
+        cloned_project = copy.deepcopy(project_data)
+        sound_files = payload.get("soundFiles")
+        if sound_files is not None and not isinstance(sound_files, list):
+            raise ValueError("Lista de audios invalida para exportacao.")
+
+        with tempfile.TemporaryDirectory(prefix="unipack_export_project_") as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            project_root = temp_dir / Path(suggested_name).stem
+            project_root.mkdir(parents=True, exist_ok=True)
+
+            cloned_project["projectPath"] = str(project_root)
+            cloned_project.setdefault(
+                "casing",
+                {
+                    "info": "Info",
+                    "keySound": "keySound",
+                    "keyLED": "keyLED",
+                    "sounds": "Sounds",
+                    "autoPlay": "autoPlay",
+                },
+            )
+            save_project(cloned_project)
+
+            sounds_dir = self._ensure_sounds_dir(project_root)
+            for sound_entry in sound_files or []:
+                relative_path = self._sanitize_relative_sound_path(str(sound_entry.get("path") or ""))
+                target_path = (sounds_dir / relative_path).resolve()
+                try:
+                    target_path.relative_to(sounds_dir.resolve())
+                except ValueError as exc:
+                    raise ValueError("Caminho de audio invalido na exportacao.") from exc
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                audio_base64 = str(sound_entry.get("audioBase64") or "").strip()
+                if not audio_base64:
+                    raise ValueError(f"Audio ausente para exportacao: {relative_path.as_posix()}")
+                target_path.write_bytes(base64.b64decode(audio_base64))
+
+            archive_path = export_project_zip(project_root, temp_dir / suggested_name)
+            return archive_path.name, archive_path.read_bytes()
 
     def _build_clip_bytes_from_source(
         self,
